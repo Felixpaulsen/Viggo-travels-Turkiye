@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Viggo Across Türkiye</title>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #21262d;
+      --accent: #f0a500; --text: #e6edf3; --muted: #8b949e;
+      --walk: #3fb950; --drive: #4363d8;
+    }
+    html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); }
+    .app { display: flex; height: 100vh; overflow: hidden; }
+
+    .sidebar {
+      width: 300px; min-width: 260px; background: var(--panel);
+      border-right: 1px solid var(--border); display: flex;
+      flex-direction: column; overflow-y: auto; z-index: 10;
+      transition: width .25s ease, min-width .25s ease;
+    }
+    .sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; border-right: none; }
+
+    .sidebar-toggle {
+      position: fixed; top: 130px; left: 284px;
+      width: 32px; height: 32px; background: var(--panel);
+      border: 1px solid var(--border); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 1000; color: var(--text); font-size: 14px;
+      transition: left .25s ease, transform .25s ease;
+    }
+    .sidebar-toggle:hover { background: #21262d; }
+    .sidebar-toggle.collapsed { left: 16px; transform: rotate(180deg); }
+
+    .sidebar-header { padding: 28px 24px 20px; border-bottom: 1px solid var(--border); }
+    .eyebrow { font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: .15em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+    .sidebar-header h1 { font-family: 'Barlow Condensed', sans-serif; font-size: 32px; font-weight: 900; line-height: 1; }
+    .sidebar-header h1 span { color: var(--accent); }
+
+    .section-label { font-family: 'Barlow Condensed', sans-serif; font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+
+    .stats { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 12px; position: relative; overflow: hidden; }
+    .stat-card::before { content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%; }
+    .stat-card.c1::before { background: #f0a500; }
+    .stat-card.c2::before { background: #58a6ff; }
+    .stat-card.c3::before { background: #3fb950; }
+    .stat-card.c4::before { background: #d2a8ff; }
+    .stat-card.c5::before { background: #e05a00; }
+    .stat-card.wide { grid-column: 1 / -1; }
+    .stat-value { font-family: 'Barlow Condensed', sans-serif; font-size: 28px; font-weight: 900; line-height: 1; }
+    .stat-unit { font-size: 11px; color: var(--muted); margin-left: 2px; }
+    .stat-name { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    .routes { padding: 20px 24px; flex: 1; }
+
+    .legend { display: flex; gap: 16px; margin-bottom: 16px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .legend-dot.walk { background: var(--walk); }
+    .legend-dot.drive { background: var(--drive); }
+
+    .route-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); cursor: pointer; transition: opacity .15s; }
+    .route-item:last-child { border-bottom: none; }
+    .route-item:hover { opacity: .7; }
+    .route-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .route-info { flex: 1; min-width: 0; }
+    .route-name { font-size: 13px; font-weight: 500; }
+    .route-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    .start-marker { font-size: 20px; line-height: 1; filter: drop-shadow(0 2px 4px rgba(0,0,0,.6)); transform: translate(-50%, -50%); display: inline-block; }
+    .current-marker { font-size: 26px; line-height: 1; filter: drop-shadow(0 2px 4px rgba(0,0,0,.6)); transform: translate(-50%, -50%); display: inline-block; }
+
+    .map-wrap { flex: 1; position: relative; }
+    #map { width: 100%; height: 100%; }
+    .leaflet-control-attribution { background: rgba(13,17,23,.8) !important; color: var(--muted) !important; font-size: 10px !important; }
+    .leaflet-control-zoom a { background: var(--panel) !important; color: var(--text) !important; border-color: var(--border) !important; }
+
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar-toggle" id="sidebar-toggle">&#8249;</div>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="eyebrow">Viggo travels</div>
+      <h1>Across Türkiye 🇹🇷</h1>
+    </div>
+    <div class="stats">
+      <div class="section-label">Summary</div>
+      <div class="stat-grid">
+        <div class="stat-card wide c1">
+          <div class="stat-value" id="stat-km">&#8212;<span class="stat-unit">km</span></div>
+          <div class="stat-name">Total distance travelled</div>
+        </div>
+        <div class="stat-card c2">
+          <div class="stat-value" id="stat-days">&#8212;</div>
+          <div class="stat-name">Days travelled</div>
+        </div>
+        <div class="stat-card c3">
+          <div class="stat-value" id="stat-avg">&#8212;</div>
+          <div class="stat-name">Average distance pr. day</div>
+        </div>
+        <div class="stat-card c4">
+          <div class="stat-value" id="stat-drive">&#8212;<span class="stat-unit">km</span></div>
+          <div class="stat-name">Distance by car</div>
+        </div>
+        <div class="stat-card c5">
+          <div class="stat-value" id="stat-walk">&#8212;<span class="stat-unit">km</span></div>
+          <div class="stat-name">Distance walked</div>
+        </div>
+      </div>
+    </div>
+    <div class="routes">
+      <div class="section-label">Routes</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot walk"></div>Walking</div>
+        <div class="legend-item"><div class="legend-dot drive"></div>Driving</div>
+      </div>
+      <div id="route-list"></div>
+    </div>
+  </aside>
+  <div class="map-wrap">
+    <div id="map"></div>
+  </div>
+</div>
+
+<script>
+// ── Map ────────────────────────────────────────────────────────────────────
+var map = L.map('map', { center: [54.5, -3.5], zoom: 6 });
+L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${{secrets.API_KEY}}', {
+  attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+  maxZoom: 19
+}).addTo(map);
+
+function getIconSize(baseSize) {
+  var zoom = map.getZoom();
+  // Scale: small at low zoom, large at high zoom. Base zoom = 10.
+  var scale = Math.pow(1.2, zoom - 10);
+  scale = Math.max(0.4, Math.min(scale, 3));
+  return Math.round(baseSize * scale);
+}
+
+function updateIconSizes() {
+  var currentSize = getIconSize(26);
+
+  document.querySelectorAll('.current-marker').forEach(function(el) {
+    el.style.fontSize = currentSize + 'px';
+  });
+
+  if (currentMarker) {
+    currentMarker.setIcon(L.divIcon({
+      className: '',
+      html: currentMarker.getIcon().options.html,
+      iconAnchor: [0, 0]
+    }));
+  }
+}
+
+map.on('zoomend', updateIconSizes);
+
+// ── Config ─────────────────────────────────────────────────────────────────
+var currentMarker = null;
+var MANIFEST  = './Routes/manifest.json';
+var TYPE_COLORS = {
+  walk:  '#3fb950',
+  drive: '#4363d8'
+};
+var TYPE_EMOJI = {
+  walk:  '\uD83D\uDEB6', // walking figure
+  drive: '\uD83D\uDE97'  // car
+};
+var TYPE_LABEL = {
+  walk:  'Gåtur',
+  drive: 'Kørsel'
+};
+var rides = [];
+
+// ── Haversine ──────────────────────────────────────────────────────────────
+function haversine(lat1, lon1, lat2, lon2) {
+  var R = 6371000, r = Math.PI / 180;
+  var f1 = lat1*r, f2 = lat2*r, df = (lat2-lat1)*r, dl = (lon2-lon1)*r;
+  var a = Math.sin(df/2)*Math.sin(df/2) + Math.cos(f1)*Math.cos(f2)*Math.sin(dl/2)*Math.sin(dl/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// ── GPX parser ─────────────────────────────────────────────────────────────
+function parseGPX(xmlStr) {
+  var latLngs = [], dist = 0, elev = 0, prev = null;
+
+  // Regex-based parsing — much faster than DOMParser on mobile
+  var ptRe = /<trkpt[^>]+lat=["']([^"']+)["'][^>]+lon=["']([^"']+)["'][^>]*>([\s\S]*?)<\/trkpt>/g;
+  var eleRe = /<ele>([^<]+)<\/ele>/;
+  var match;
+
+  while ((match = ptRe.exec(xmlStr)) !== null) {
+    var lat = parseFloat(match[1]);
+    var lon = parseFloat(match[2]);
+    var eleMatch = eleRe.exec(match[3]);
+    var ele = eleMatch ? parseFloat(eleMatch[1]) : NaN;
+    if (isNaN(lat) || isNaN(lon)) continue;
+    if (prev) {
+      dist += haversine(prev.lat, prev.lon, lat, lon);
+      if (!isNaN(ele) && !isNaN(prev.ele) && ele > prev.ele) elev += ele - prev.ele;
+    }
+    prev = { lat: lat, lon: lon, ele: ele };
+    latLngs.push([lat, lon]);
+  }
+
+  if (latLngs.length < 2) return null;
+
+  // Extract date from first <time> tag
+  var timeMatch = xmlStr.match(/<time>([^<]+)<\/time>/);
+  var date = timeMatch ? new Date(timeMatch[1]) : null;
+
+  // Extract name from <name> tag
+  var nameMatch = xmlStr.match(/<n(?:ame)?>([^<]+)<\/n(?:ame)?>/);
+  var name = nameMatch ? nameMatch[1].trim() : null;
+
+  // Extract mode of travel. GPS Logger writes a comment like
+  // "<!-- Activity = car -->" (sometimes misspelled "Acitvity"); some other
+  // apps use a <type> tag instead, e.g. <trk><type>driving</type>...
+  var activityMatch = xmlStr.match(/<!--\s*Ac\w*vity\s*=\s*([^\s>-]+)\s*-->/i);
+  var typeMatch      = xmlStr.match(/<type>([^<]+)<\/type>/i);
+  var modeRaw = (activityMatch ? activityMatch[1] : (typeMatch ? typeMatch[1] : '')).trim().toLowerCase();
+  var type = /driv|car|bil/.test(modeRaw) ? 'drive' : 'walk';
+
+  return { latLngs: latLngs, distKm: dist / 1000, elevM: Math.round(elev), date: date, name: name, type: type };
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+function fmt(km) { return km >= 100 ? Math.round(km).toLocaleString() : km.toFixed(1); }
+function setHTML(id, html) { var el = document.getElementById(id); if (el) el.innerHTML = html; }
+
+function updateStats() {
+  if (!rides.length) return;
+  var totalKm   = rides.reduce(function(s,r){ return s + r.distKm; }, 0);
+  var avgKm     = totalKm / rides.length;
+  var driveKm   = rides.filter(function(r){ return r.type === 'drive'; }).reduce(function(s,r){ return s + r.distKm; }, 0);
+  var walkKm    = rides.filter(function(r){ return r.type === 'walk';  }).reduce(function(s,r){ return s + r.distKm; }, 0);
+  var dated     = rides.filter(function(r){ return r.date && !isNaN(r.date); });
+  var days      = new Set(dated.map(function(r){ return r.date.toISOString().slice(0,10); })).size;
+
+  setHTML('stat-km',    fmt(totalKm) + '<span class="stat-unit">km</span>');
+  setHTML('stat-days',  String(days || rides.length));
+  setHTML('stat-avg',   fmt(avgKm)   + '<span class="stat-unit">km</span>');
+  setHTML('stat-drive', fmt(driveKm) + '<span class="stat-unit">km</span>');
+  setHTML('stat-walk',  fmt(walkKm)  + '<span class="stat-unit">km</span>');
+}
+
+// ── Route list ─────────────────────────────────────────────────────────────
+function renderRouteList() {
+  var list = document.getElementById('route-list');
+  if (!rides.length) { list.innerHTML = '<p style="font-size:12px;color:var(--muted);">Ingen ruter endnu.</p>'; return; }
+
+  // Newest (highest order) first, matching the old "most recent first" feel.
+  var sorted = rides.slice().sort(function(a,b){ return b.order - a.order; });
+
+  list.innerHTML = sorted.map(function(r) {
+    var dateStr = (r.date && !isNaN(r.date)) ? ' &middot; ' + r.date.toLocaleDateString('da-DK', {day:'numeric',month:'short',year:'numeric'}) : '';
+    var typeStr = TYPE_LABEL[r.type] || r.type;
+    return '<div class="route-item" data-id="' + r.id + '">'
+      + '<div class="route-dot" style="background:' + r.color + '"></div>'
+      + '<div class="route-info">'
+      + '<div class="route-name" title="' + r.name + '">' + r.name + '</div>'
+      + '<div class="route-meta">' + typeStr + ' &middot; ' + fmt(r.distKm) + ' km &middot; ' + r.elevM.toLocaleString() + ' m &uarr;' + dateStr + '</div>'
+      + '</div></div>';
+  }).join('');
+
+  list.querySelectorAll('.route-item').forEach(function(el) {
+    var id = parseInt(el.dataset.id);
+    el.addEventListener('mouseenter', function(){ rides[id].polyline.setStyle({ weight: 6, opacity: 1 }); });
+    el.addEventListener('mouseleave', function(){ rides[id].polyline.setStyle({ weight: 3.5, opacity: 0.9 }); });
+    el.addEventListener('click', function(){ map.fitBounds(L.latLngBounds(rides[id].latLngs).pad(0.12)); });
+  });
+}
+
+// ── Start / current position markers ──────────────────────────────────────
+function placeStartMarker() {
+  if (!rides.length) return;
+  var first = rides.reduce(function(a,b){ return a.order < b.order ? a : b; });
+  var firstPt = first.latLngs[0];
+  var icon = L.divIcon({ className: '', html: '<div class="start-marker">🏁</div>', iconAnchor: [0, 0] });
+  L.marker(firstPt, { icon: icon, zIndexOffset: 900 }).addTo(map)
+    .bindTooltip('Start', { permanent: false, direction: 'top', offset: [0, -8] });
+}
+
+function placeCurrentMarker() {
+  if (!rides.length) return;
+  var newest = rides.reduce(function(a,b){ return a.order > b.order ? a : b; });
+  var lastPt = newest.latLngs[newest.latLngs.length - 1];
+  var emoji  = TYPE_EMOJI[newest.type] || TYPE_EMOJI.walk;
+  var icon   = L.divIcon({ className: '', html: '<div class="current-marker">' + emoji + '</div>', iconAnchor: [0, 0] });
+  currentMarker = L.marker(lastPt, { icon: icon, zIndexOffset: 1000 }).addTo(map)
+    .bindTooltip(newest.name, { permanent: false, direction: 'top', offset: [0, -10] });
+}
+
+// ── Cache GPX text in localStorage — repeat visits are instant ────────────
+function fetchWithCache(url) {
+  var key = 'gpx:' + url;
+  try {
+    var cached = localStorage.getItem(key);
+    if (cached) return Promise.resolve(cached);
+  } catch(e) {}
+  return fetch(url)
+    .then(function(res) {
+      if (!res.ok) return null;
+      return res.text().then(function(text) {
+        try { localStorage.setItem(key, text); } catch(e) {}
+        return text;
+      });
+    });
+}
+
+// ── Load all routes ────────────────────────────────────────────────────────
+function loadAllRoutes() {
+  fetch(MANIFEST + '?' + Date.now())
+    .then(function(res) {
+      if (!res.ok) throw new Error('manifest.json not found, status: ' + res.status);
+      return res.json();
+    })
+    .then(function(manifest) {
+      var promises = manifest.map(function(filename, idx) {
+        return fetchWithCache('./Routes/' + filename)
+          .then(function(gpxText) {
+            if (!gpxText) return null;
+            var data = parseGPX(gpxText);
+            if (!data || data.latLngs.length < 2) return null;
+            // Chronological order comes from the GPX's own timestamp; routes
+            // without a <time> tag fall back to their position in manifest.json.
+            var order = (data.date && !isNaN(data.date)) ? data.date.getTime() : idx;
+            return { filename: filename, data: data, order: order, type: data.type };
+          })
+          .catch(function() { return null; });
+      });
+
+      return Promise.all(promises);
+    })
+    .then(function(results) {
+      if (!results) return;
+      results
+        .filter(function(r) { return r !== null; })
+        .sort(function(a, b) { return a.order - b.order; })
+        .forEach(function(r) {
+          var color    = TYPE_COLORS[r.type] || TYPE_COLORS.walk;
+          var polyline = L.polyline(r.data.latLngs, { color: color, weight: 3.5, opacity: 0.9, lineJoin: 'round' }).addTo(map);
+          rides.push({
+            id: rides.length,
+            filename: r.filename,
+            order: r.order,
+            type: r.type,
+            name: r.data.name || r.filename.replace(/\.gpx$/i,''),
+            color: color,
+            distKm: r.data.distKm,
+            elevM: r.data.elevM,
+            date: r.data.date,
+            polyline: polyline,
+            latLngs: r.data.latLngs
+          });
+        });
+
+      updateStats();
+      renderRouteList();
+
+      if (rides.length) {
+        var allPts = [];
+        rides.forEach(function(r) { allPts = allPts.concat(r.latLngs); });
+        map.fitBounds(L.latLngBounds(allPts).pad(0.08));
+        placeCurrentMarker();
+        placeStartMarker();
+      }
+    })
+    .catch(function(e) { console.error('FATAL loadAllRoutes:', e.message, e.stack); });
+}
+
+// ── Sidebar toggle ─────────────────────────────────────────────────────────
+document.getElementById('sidebar-toggle').addEventListener('click', function() {
+  document.getElementById('sidebar').classList.toggle('collapsed');
+  document.getElementById('sidebar-toggle').classList.toggle('collapsed');
+  setTimeout(function(){ map.invalidateSize(); }, 260);
+});
+
+// ── Go ─────────────────────────────────────────────────────────────────────
+loadAllRoutes();
+</script>
+</body>
+</html>

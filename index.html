@@ -290,7 +290,7 @@ function placeStartMarker() {
   if (!rides.length) return;
   var first = rides.reduce(function(a,b){ return a.order < b.order ? a : b; });
   var firstPt = first.latLngs[0];
-  var icon = L.divIcon({ className: '', html: '<div class="start-marker">🔵</div>', iconAnchor: [0, 0] });
+  var icon = L.divIcon({ className: '', html: '<div class="start-marker">🔸</div>', iconAnchor: [0, 0] });
   L.marker(firstPt, { icon: icon, zIndexOffset: 900 }).addTo(map)
     .bindTooltip('Start', { permanent: false, direction: 'top', offset: [0, -8] });
 }

@@ -110,7 +110,7 @@
         </div>
         <div class="stat-card c4">
           <div class="stat-value" id="stat-drive">&#8212;<span class="stat-unit">km</span></div>
-          <div class="stat-name">Distance by car</div>
+          <div class="stat-name">Distance hitchhiked</div>
         </div>
         <div class="stat-card c5">
           <div class="stat-value" id="stat-walk">&#8212;<span class="stat-unit">km</span></div>
@@ -122,7 +122,7 @@
       <div class="section-label">Routes</div>
       <div class="legend">
         <div class="legend-item"><div class="legend-dot walk"></div>Walking</div>
-        <div class="legend-item"><div class="legend-dot drive"></div>Driving</div>
+        <div class="legend-item"><div class="legend-dot drive"></div>Hitchiking</div>
       </div>
       <div id="route-list"></div>
     </div>
@@ -134,7 +134,7 @@
 
 <script>
 // ── Map ────────────────────────────────────────────────────────────────────
-var map = L.map('map', { center: [54.5, -3.5], zoom: 6 });
+var map = L.map('map', { center: [39.245472, 35.487361], zoom: 6 });
 L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
   maxZoom: 19

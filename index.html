@@ -372,7 +372,7 @@ function loadAllRoutes() {
       if (rides.length) {
         var allPts = [];
         rides.forEach(function(r) { allPts = allPts.concat(r.latLngs); });
-        map.fitBounds(L.latLngBounds(allPts).pad(0.08));
+        //map.fitBounds(L.latLngBounds(allPts).pad(0.08));
         placeCurrentMarker();
         placeStartMarker();
       }

@@ -135,7 +135,7 @@
 <script>
 // ── Map ────────────────────────────────────────────────────────────────────
 var map = L.map('map', { center: [54.5, -3.5], zoom: 6 });
-L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${{secrets.API_KEY}}', {
+L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=__CARTO_API_KEY__', {
   attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
   maxZoom: 19
 }).addTo(map);

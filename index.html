@@ -91,7 +91,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <div class="eyebrow">Viggo travels</div>
-      <h1>Across Türkiye 🇹🇷</h1>
+      <h1>🇹🇷 Across Türkiye</h1>
     </div>
     <div class="stats">
       <div class="section-label">Summary</div>
@@ -258,7 +258,7 @@ function updateStats() {
 // ── Route list ─────────────────────────────────────────────────────────────
 function renderRouteList() {
   var list = document.getElementById('route-list');
-  if (!rides.length) { list.innerHTML = '<p style="font-size:12px;color:var(--muted);">Ingen ruter endnu.</p>'; return; }
+  if (!rides.length) { list.innerHTML = '<p style="font-size:12px;color:var(--muted);">No routes yet.</p>'; return; }
 
   // Newest (highest order) first, matching the old "most recent first" feel.
   var sorted = rides.slice().sort(function(a,b){ return b.order - a.order; });

@@ -252,8 +252,8 @@ function updateStats() {
   var days      = new Set(dated.map(function(r){ return r.date.toISOString().slice(0,10); })).size;
 
   setHTML('stat-km',    fmt(totalKm) + '<span class="stat-unit">km</span>');
-  setHTML('stat-days',  String(days || rides.length));
-  setHTML('stat-avg',   fmt(avgKm)   + '<span class="stat-unit">km</span>');
+  setHTML('stat-days',  String(days));
+  setHTML('stat-avg',   fmt(totalKm/days)   + '<span class="stat-unit">km</span>');
   setHTML('stat-drive', fmt(driveKm) + '<span class="stat-unit">km</span>');
   setHTML('stat-walk',  fmt(walkKm)  + '<span class="stat-unit">km</span>');
 }

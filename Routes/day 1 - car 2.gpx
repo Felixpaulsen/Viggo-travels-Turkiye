@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Created with BasicAirData GPS Logger for Android - ver. 3.3.0 -->
+<!-- Track 2 = 4 TrackPoints + 0 Placemarks -->
+
+<!-- Track Statistics (based on Total Time | Time in Movement): -->
+<!--  Distance = 189 m -->
+<!--  Duration = 00:08 | 00:08 -->
+<!--  Altitude Gap = 0 m -->
+<!--  Max Speed = 86 km/h -->
+<!--  Avg Speed = 85.5 | 85.5 km/h -->
+<!--  Direction = NNW -->
+<!--  Activity = car -->
+<!--  Altitudes = Raw -->
+
+<gpx version="1.0"
+     creator="BasicAirData GPS Logger 3.3.0"
+     xmlns="http://www.topografix.com/GPX/1/0"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/0 http://www.topografix.com/GPX/1/0/gpx.xsd">
+<name>GPS Logger 20260909-135259</name>
+<time>2026-09-09T16:46:54Z</time>
+<keywords>car</keywords>
+<bounds minlat="39.46690546" minlon="44.26070914" maxlat="39.46844179" maxlon="44.26167942" />
+
+<trk>
+ <name>Track 20260909-135259</name>
+ <trkseg>
+  <trkpt lat="39.46690546" lon="44.26167942"><ele>1558.093</ele><time>2026-09-09T10:52:59Z</time><speed>23.990</speed><sat>35</sat></trkpt>
+  <trkpt lat="39.46708910" lon="44.26154823"><ele>1557.951</ele><time>2026-09-09T10:53:00Z</time><speed>23.210</speed><sat>35</sat></trkpt>
+  <trkpt lat="39.46727241" lon="44.26141847"><ele>1557.494</ele><time>2026-09-09T10:53:01Z</time><speed>22.820</speed><sat>34</sat></trkpt>
+  <trkpt lat="39.46844179" lon="44.26070914"><ele>1558.334</ele><time>2026-09-09T10:53:07Z</time><speed>23.530</speed><sat>31</sat></trkpt>
+ </trkseg>
+</trk>
+
+</gpx>
+ 

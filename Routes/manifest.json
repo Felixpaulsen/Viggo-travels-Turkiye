@@ -1,21 +1,19 @@
-{
-  "files": [
-    "day 01 - car 01.gpx",
-    "day 01 - car 02.gpx",
-    "day 01 - walk 01.gpx",
-    "day 01 - walk 02.gpx",
-    "day 02 - car 01.gpx",
-    "day 02 - car 02.gpx",
-    "day 02 - car 03.gpx",
-    "day 02 - walk 01.gpx",
-    "day 02 - walk 02.gpx",
-    "day 02 - walk 03.gpx",
-    "day 03 - walk 01.gpx",
-    "day 04 - car 01.gpx",
-    "day 04 - car 02.gpx",
-    "day 04 - car 03.gpx",
-    "day 04 - walk 01.gpx",
-    "day 04 - walk 02.gpx",
-    "day 04 - walk 03.gpx"
-  ]
-}
+[
+  "day 01 - car 01.gpx",
+  "day 01 - car 02.gpx",
+  "day 01 - walk 01.gpx",
+  "day 01 - walk 02.gpx",
+  "day 02 - car 01.gpx",
+  "day 02 - car 02.gpx",
+  "day 02 - car 03.gpx",
+  "day 02 - walk 01.gpx",
+  "day 02 - walk 02.gpx",
+  "day 02 - walk 03.gpx",
+  "day 03 - walk 01.gpx",
+  "day 04 - car 01.gpx",
+  "day 04 - car 02.gpx",
+  "day 04 - car 03.gpx",
+  "day 04 - walk 01.gpx",
+  "day 04 - walk 02.gpx",
+  "day 04 - walk 03.gpx"
+]

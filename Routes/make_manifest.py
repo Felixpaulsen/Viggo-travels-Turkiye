@@ -24,10 +24,8 @@ def main():
     # Sort alphabetically
     files.sort()
 
-    manifest = {"files": files}
-
     with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(files, f, indent=2)
 
     print(f"Created {manifest_path} with {len(files)} file(s).")
 

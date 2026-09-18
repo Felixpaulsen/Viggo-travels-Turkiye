@@ -64,6 +64,34 @@
 
     .routes { padding: 20px 24px; flex: 1; }
 
+    .day-filter { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+    .day-filter-row { display: flex; align-items: center; gap: 8px; }
+    .day-filter-row select {
+      flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+      font-size: 12px; font-family: 'Inter', sans-serif;
+    }
+    .day-filter-sep { color: var(--muted); font-size: 12px; }
+    .day-reset-btn {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      border-radius: 6px; padding: 6px 10px; font-size: 11px; cursor: pointer;
+      font-family: 'Barlow Condensed', sans-serif; text-transform: uppercase; letter-spacing: .05em;
+      flex-shrink: 0;
+    }
+    .day-reset-btn:hover { color: var(--text); border-color: var(--muted); }
+
+    .play-btn {
+      position: absolute; bottom: 46px; right: 16px;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--panel); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 1000; color: var(--text); font-size: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.5);
+      transition: background .15s, transform .15s;
+    }
+    .play-btn:hover { background: #21262d; transform: scale(1.05); }
+    .play-btn.playing { color: var(--accent); }
+
     .legend { display: flex; gap: 16px; margin-bottom: 16px; }
     .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
     .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
@@ -121,6 +149,15 @@
         </div>
       </div>
     </div>
+    <div class="day-filter" id="day-filter" style="display:none;">
+      <div class="section-label">Days</div>
+      <div class="day-filter-row">
+        <select id="day-from"></select>
+        <span class="day-filter-sep">&ndash;</span>
+        <select id="day-to"></select>
+        <button type="button" id="day-reset" class="day-reset-btn" title="Show all days">All</button>
+      </div>
+    </div>
     <div class="routes">
       <div class="section-label">Routes</div>
       <div class="legend">
@@ -132,6 +169,7 @@
   </aside>
   <div class="map-wrap">
     <div id="map"></div>
+    <div class="play-btn" id="play-btn" title="Play route animation">&#9654;</div>
   </div>
 </div>
 
@@ -171,6 +209,9 @@ map.on('zoomend', updateIconSizes);
 
 // ── Config ─────────────────────────────────────────────────────────────────
 var currentMarker = null;
+var startMarker    = null;
+var dayFilter       = null;  // { min, max } or null = show all days
+var dayFilterInitialized = false;
 var MANIFEST  = './Routes/manifest.json';
 var TYPE_COLORS = {
   walk:  '#3fb950',
@@ -243,22 +284,127 @@ function parseGPX(xmlStr) {
   return { latLngs: latLngs, distKm: dist / 1000, elevM: Math.round(elev), date: date, type: type };
 }
 
+// ── Day filtering ──────────────────────────────────────────────────────────
+// Day numbers come from grouping each route's own timestamp by calendar
+// date, not from filenames — 1 is the earliest date seen, 2 the next, etc.
+// Routes with no usable timestamp are always shown, since they can't be
+// placed into a day.
+function assignDayNumbers() {
+  var dateStrs = [];
+  rides.forEach(function(r) {
+    if (r.date && !isNaN(r.date)) {
+      var d = r.date.toISOString().slice(0, 10);
+      if (dateStrs.indexOf(d) === -1) dateStrs.push(d);
+    }
+  });
+  dateStrs.sort();
+  var dayMap = {};
+  dateStrs.forEach(function(d, i) { dayMap[d] = i + 1; });
+  rides.forEach(function(r) {
+    r.dayNumber = (r.date && !isNaN(r.date)) ? dayMap[r.date.toISOString().slice(0, 10)] : null;
+  });
+}
+
+function isRideVisible(r) {
+  if (!dayFilter) return true;
+  if (r.dayNumber === null || r.dayNumber === undefined) return true;
+  return r.dayNumber >= dayFilter.min && r.dayNumber <= dayFilter.max;
+}
+
+function getVisibleRides() {
+  return rides.filter(isRideVisible);
+}
+
+function applyVisibilityStyles() {
+  rides.forEach(function(r) {
+    r.polyline.setStyle({ opacity: isRideVisible(r) ? 0.9 : 0 });
+  });
+}
+
+function computeMaxDay() {
+  var max = 0;
+  rides.forEach(function(r) { if (r.dayNumber) max = Math.max(max, r.dayNumber); });
+  return max;
+}
+
+function populateDayFilterOptions() {
+  var maxDay = computeMaxDay();
+  var wrap = document.getElementById('day-filter');
+
+  if (maxDay < 2) { wrap.style.display = 'none'; dayFilter = null; return; }
+
+  var fromSel = document.getElementById('day-from');
+  var toSel   = document.getElementById('day-to');
+  var opts = '';
+  for (var d = 1; d <= maxDay; d++) opts += '<option value="' + d + '">Day ' + d + '</option>';
+  if (fromSel.innerHTML !== opts) fromSel.innerHTML = opts;
+  if (toSel.innerHTML !== opts) toSel.innerHTML = opts;
+
+  if (!dayFilterInitialized) {
+    dayFilterInitialized = true;
+    dayFilter = { min: 1, max: maxDay };
+  } else {
+    // Keep the user's current selection, clamped to the (possibly changed) range.
+    var min = Math.min(Math.max(dayFilter ? dayFilter.min : 1, 1), maxDay);
+    var max = Math.max(min, Math.min(dayFilter ? dayFilter.max : maxDay, maxDay));
+    dayFilter = { min: min, max: max };
+  }
+
+  fromSel.value = dayFilter.min;
+  toSel.value   = dayFilter.max;
+  wrap.style.display = 'block';
+}
+
+function refreshFilteredView() {
+  applyVisibilityStyles();
+  updateStats();
+  renderRouteList();
+  placeCurrentMarker();
+  placeStartMarker();
+}
+
+function onDayFilterChange() {
+  if (animating) stopAnimation();
+  var fromSel = document.getElementById('day-from');
+  var toSel   = document.getElementById('day-to');
+  var min = parseInt(fromSel.value, 10);
+  var max = parseInt(toSel.value, 10);
+  if (min > max) { max = min; toSel.value = max; }
+  dayFilter = { min: min, max: max };
+  refreshFilteredView();
+}
+
+document.getElementById('day-from').addEventListener('change', onDayFilterChange);
+document.getElementById('day-to').addEventListener('change', onDayFilterChange);
+document.getElementById('day-reset').addEventListener('click', function() {
+  if (animating) stopAnimation();
+  var maxDay = computeMaxDay();
+  dayFilter = { min: 1, max: maxDay };
+  document.getElementById('day-from').value = 1;
+  document.getElementById('day-to').value = maxDay;
+  refreshFilteredView();
+});
+
 // ── Stats ──────────────────────────────────────────────────────────────────
 function fmt(km) { return km >= 100 ? Math.round(km).toLocaleString() : km.toFixed(1); }
 function setHTML(id, html) { var el = document.getElementById(id); if (el) el.innerHTML = html; }
 
 function updateStats() {
-  if (!rides.length) return;
-  var totalKm   = rides.reduce(function(s,r){ return s + r.distKm; }, 0);
-  var avgKm     = totalKm / rides.length;
-  var driveKm   = rides.filter(function(r){ return r.type === 'drive'; }).reduce(function(s,r){ return s + r.distKm; }, 0);
-  var walkKm    = rides.filter(function(r){ return r.type === 'walk';  }).reduce(function(s,r){ return s + r.distKm; }, 0);
-  var dated     = rides.filter(function(r){ return r.date && !isNaN(r.date); });
+  var visible = getVisibleRides();
+  if (!visible.length) {
+    ['stat-km','stat-avg','stat-drive','stat-walk'].forEach(function(id){ setHTML(id, '&#8212;<span class="stat-unit">km</span>'); });
+    setHTML('stat-days', '&#8212;');
+    return;
+  }
+  var totalKm   = visible.reduce(function(s,r){ return s + r.distKm; }, 0);
+  var driveKm   = visible.filter(function(r){ return r.type === 'drive'; }).reduce(function(s,r){ return s + r.distKm; }, 0);
+  var walkKm    = visible.filter(function(r){ return r.type === 'walk';  }).reduce(function(s,r){ return s + r.distKm; }, 0);
+  var dated     = visible.filter(function(r){ return r.date && !isNaN(r.date); });
   var days      = new Set(dated.map(function(r){ return r.date.toISOString().slice(0,10); })).size;
 
   setHTML('stat-km',    fmt(totalKm) + '<span class="stat-unit">km</span>');
   setHTML('stat-days',  String(days));
-  setHTML('stat-avg',   fmt(totalKm/days)   + '<span class="stat-unit">km</span>');
+  setHTML('stat-avg',   fmt(days ? totalKm/days : totalKm) + '<span class="stat-unit">km</span>');
   setHTML('stat-drive', fmt(driveKm) + '<span class="stat-unit">km</span>');
   setHTML('stat-walk',  fmt(walkKm)  + '<span class="stat-unit">km</span>');
 }
@@ -268,8 +414,11 @@ function renderRouteList() {
   var list = document.getElementById('route-list');
   if (!rides.length) { list.innerHTML = '<p style="font-size:12px;color:var(--muted);">No routes yet.</p>'; return; }
 
+  var visible = getVisibleRides();
+  if (!visible.length) { list.innerHTML = '<p style="font-size:12px;color:var(--muted);">No routes for the selected days.</p>'; return; }
+
   // Newest (highest order) first, matching the old "most recent first" feel.
-  var sorted = rides.slice().sort(function(a,b){ return b.order - a.order; });
+  var sorted = visible.slice().sort(function(a,b){ return b.order - a.order; });
 
   list.innerHTML = sorted.map(function(r) {
     var dateStr = (r.date && !isNaN(r.date)) ? ' &middot; ' + r.date.toLocaleDateString('da-DK', {day:'numeric',month:'short',year:'numeric'}) : '';
@@ -292,17 +441,21 @@ function renderRouteList() {
 
 // ── Start / current position markers ──────────────────────────────────────
 function placeStartMarker() {
-  if (!rides.length) return;
-  var first = rides.reduce(function(a,b){ return a.order < b.order ? a : b; });
+  if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+  var visible = getVisibleRides();
+  if (!visible.length) return;
+  var first = visible.reduce(function(a,b){ return a.order < b.order ? a : b; });
   var firstPt = first.latLngs[0];
   var icon = L.divIcon({ className: '', html: '<div class="start-marker">🔸</div>', iconAnchor: [0, 0] });
-  L.marker(firstPt, { icon: icon, zIndexOffset: 900 }).addTo(map)
+  startMarker = L.marker(firstPt, { icon: icon, zIndexOffset: 900 }).addTo(map)
     .bindTooltip('Start', { permanent: false, direction: 'top', offset: [0, -8] });
 }
 
 function placeCurrentMarker() {
-  if (!rides.length) return;
-  var newest = rides.reduce(function(a,b){ return a.order > b.order ? a : b; });
+  if (currentMarker) { map.removeLayer(currentMarker); currentMarker = null; }
+  var visible = getVisibleRides();
+  if (!visible.length) return;
+  var newest = visible.reduce(function(a,b){ return a.order > b.order ? a : b; });
   var lastPt = newest.latLngs[newest.latLngs.length - 1];
   var emoji  = TYPE_EMOJI[newest.type] || TYPE_EMOJI.walk;
   var icon   = L.divIcon({ className: '', html: '<div class="current-marker">' + emoji + '</div>', iconAnchor: [0, 0] });
@@ -323,6 +476,22 @@ function readCache(key) {
 }
 function writeCache(key, value) {
   try { localStorage.setItem(key, value); } catch (e) {}
+}
+
+// Drop any cached GPX text for files no longer listed in manifest.json —
+// covers both deletions and renames (a rename creates a new cache key and
+// leaves the old one orphaned).
+function pruneStaleCache(manifest) {
+  var keep = {};
+  manifest.forEach(function(filename) { keep['gpx:' + filename] = true; });
+  try {
+    for (var i = localStorage.length - 1; i >= 0; i--) {
+      var key = localStorage.key(i);
+      if (key && key.indexOf('gpx:') === 0 && !keep[key]) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (e) {}
 }
 
 // Parses one GPX file's text into a ride object with its polyline already
@@ -352,15 +521,13 @@ function buildRide(filename, fallbackOrder, gpxText) {
 function resortRides() {
   rides.sort(function(a, b) { return a.order - b.order; });
   rides.forEach(function(r, i) { r.id = i; });
+  assignDayNumbers();
 }
 
 function renderEverything() {
-  updateStats();
-  renderRouteList();
-  if (rides.length) {
-    placeCurrentMarker();
-    placeStartMarker();
-  }
+  if (animating) stopAnimation();
+  populateDayFilterOptions();
+  refreshFilteredView();
 }
 
 // ── Load all routes ────────────────────────────────────────────────────────
@@ -376,6 +543,7 @@ function loadAllRoutes() {
       return res.json();
     })
     .then(function(manifest) {
+      pruneStaleCache(manifest);
       var toRevalidate = []; // entries that came from cache and should be double-checked
 
       var firstPaint = manifest.map(function(filename, idx) {
@@ -443,6 +611,81 @@ function revalidateInBackground(entries, ridesByFile) {
     }
   });
 }
+
+// ── Route animation ────────────────────────────────────────────────────────
+// Plays the currently visible (day-filtered) routes in chronological order,
+// tracing each one out point-by-point with a moving marker, then restores
+// the normal static view.
+var animating = false;
+var animLayers = [];
+
+function stopAnimation() {
+  if (!animating) return;
+  animating = false;
+  animLayers.forEach(function(l) { map.removeLayer(l); });
+  animLayers = [];
+  applyVisibilityStyles();
+  var btn = document.getElementById('play-btn');
+  btn.innerHTML = '&#9654;';
+  btn.title = 'Play route animation';
+  btn.classList.remove('playing');
+}
+
+function playAnimation() {
+  var visible = getVisibleRides().slice().sort(function(a, b) { return a.order - b.order; });
+  if (!visible.length) return;
+  animating = true;
+
+  var btn = document.getElementById('play-btn');
+  btn.innerHTML = '&#9632;';
+  btn.title = 'Stop animation';
+  btn.classList.add('playing');
+
+  visible.forEach(function(r) { r.polyline.setStyle({ opacity: 0 }); });
+
+  function travelerIcon(type) {
+    return L.divIcon({ className: '', html: '<div class="current-marker">' + (TYPE_EMOJI[type] || TYPE_EMOJI.walk) + '</div>', iconAnchor: [0, 0] });
+  }
+  var traveler = L.marker(visible[0].latLngs[0], { icon: travelerIcon(visible[0].type), zIndexOffset: 1200 }).addTo(map);
+  animLayers.push(traveler);
+
+  var idx = 0;
+  function animateNext() {
+    if (!animating) return;
+    if (idx >= visible.length) { stopAnimation(); return; }
+
+    var r = visible[idx];
+    var animLine = L.polyline([], { color: r.color, weight: 4, opacity: 1 }).addTo(map);
+    animLayers.push(animLine);
+    traveler.setIcon(travelerIcon(r.type));
+
+    var pts = r.latLngs;
+    var durationMs = Math.max(500, Math.min(4000, r.distKm * 60));
+    var startTime = null;
+
+    function frame(ts) {
+      if (!animating) return;
+      if (!startTime) startTime = ts;
+      var progress = Math.min(1, (ts - startTime) / durationMs);
+      var count = Math.max(2, Math.round(pts.length * progress));
+      var slice = pts.slice(0, count);
+      animLine.setLatLngs(slice);
+      traveler.setLatLng(slice[slice.length - 1]);
+      if (progress < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        idx++;
+        animateNext();
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  animateNext();
+}
+
+document.getElementById('play-btn').addEventListener('click', function() {
+  if (animating) stopAnimation(); else playAnimation();
+});
 
 // ── Sidebar toggle ─────────────────────────────────────────────────────────
 document.getElementById('sidebar-toggle').addEventListener('click', function() {

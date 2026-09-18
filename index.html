@@ -201,7 +201,9 @@ function parseGPX(xmlStr) {
   // Regex-based parsing — much faster than DOMParser on mobile
   var ptRe = /<trkpt[^>]+lat=["']([^"']+)["'][^>]+lon=["']([^"']+)["'][^>]*>([\s\S]*?)<\/trkpt>/g;
   var eleRe = /<ele>([^<]+)<\/ele>/;
+  var timeRe = /<time>([^<]+)<\/time>/;
   var match;
+  var firstPtTime = null;
 
   while ((match = ptRe.exec(xmlStr)) !== null) {
     var lat = parseFloat(match[1]);
@@ -212,6 +214,9 @@ function parseGPX(xmlStr) {
     if (prev) {
       dist += haversine(prev.lat, prev.lon, lat, lon);
       if (!isNaN(ele) && !isNaN(prev.ele) && ele > prev.ele) elev += ele - prev.ele;
+    } else {
+      var ptTimeMatch = timeRe.exec(match[3]);
+      if (ptTimeMatch) firstPtTime = ptTimeMatch[1];
     }
     prev = { lat: lat, lon: lon, ele: ele };
     latLngs.push([lat, lon]);
@@ -219,9 +224,13 @@ function parseGPX(xmlStr) {
 
   if (latLngs.length < 2) return null;
 
-  // Extract date from first <time> tag
-  var timeMatch = xmlStr.match(/<time>([^<]+)<\/time>/);
-  var date = timeMatch ? new Date(timeMatch[1]) : null;
+  // Prefer the first trackpoint's own timestamp (when recording actually
+  // started) over any <time> in <metadata>, which is usually the file's
+  // export/creation time and can be misleading for ordering routes.
+  var date = firstPtTime ? new Date(firstPtTime) : (function() {
+    var m = xmlStr.match(/<time>([^<]+)<\/time>/);
+    return m ? new Date(m[1]) : null;
+  })();
 
   // Extract mode of travel. GPS Logger writes a comment like
   // "<!-- Activity = car -->" (sometimes misspelled "Acitvity"); some other

@@ -223,10 +223,6 @@ function parseGPX(xmlStr) {
   var timeMatch = xmlStr.match(/<time>([^<]+)<\/time>/);
   var date = timeMatch ? new Date(timeMatch[1]) : null;
 
-  // Extract name from <name> tag
-  var nameMatch = xmlStr.match(/<n(?:ame)?>([^<]+)<\/n(?:ame)?>/);
-  var name = nameMatch ? nameMatch[1].trim() : null;
-
   // Extract mode of travel. GPS Logger writes a comment like
   // "<!-- Activity = car -->" (sometimes misspelled "Acitvity"); some other
   // apps use a <type> tag instead, e.g. <trk><type>driving</type>...
@@ -235,7 +231,7 @@ function parseGPX(xmlStr) {
   var modeRaw = (activityMatch ? activityMatch[1] : (typeMatch ? typeMatch[1] : '')).trim().toLowerCase();
   var type = /drive|car/.test(modeRaw) ? 'drive' : 'walk';
 
-  return { latLngs: latLngs, distKm: dist / 1000, elevM: Math.round(elev), date: date, name: name, type: type };
+  return { latLngs: latLngs, distKm: dist / 1000, elevM: Math.round(elev), date: date, type: type };
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────
@@ -306,81 +302,137 @@ function placeCurrentMarker() {
 }
 
 // ── Cache GPX text in localStorage — repeat visits are instant ────────────
-function fetchWithCache(url) {
-  var key = 'gpx:' + url;
-  try {
-    var cached = localStorage.getItem(key);
-    if (cached) return Promise.resolve(cached);
-  } catch(e) {}
-  return fetch(url)
-    .then(function(res) {
-      if (!res.ok) return null;
-      return res.text().then(function(text) {
-        try { localStorage.setItem(key, text); } catch(e) {}
-        return text;
-      });
-    });
+// Filenames can contain spaces, colons, '#', etc. — encode them so the
+// request actually reaches the file instead of being mangled as a URL
+// fragment (a bare '#' truncates everything after it).
+function routeUrl(filename) {
+  return './Routes/' + encodeURIComponent(filename);
+}
+
+function readCache(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function writeCache(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) {}
+}
+
+// Parses one GPX file's text into a ride object with its polyline already
+// added to the map. The display name is always the filename (sans .gpx).
+function buildRide(filename, fallbackOrder, gpxText) {
+  var data = parseGPX(gpxText);
+  if (!data || data.latLngs.length < 2) return null;
+  // Chronological order comes from the GPX's own timestamp; routes without
+  // a <time> tag fall back to their position in manifest.json.
+  var order = (data.date && !isNaN(data.date)) ? data.date.getTime() : fallbackOrder;
+  var color = TYPE_COLORS[data.type] || TYPE_COLORS.walk;
+  var polyline = L.polyline(data.latLngs, { color: color, weight: 3.5, opacity: 0.9, lineJoin: 'round' }).addTo(map);
+  return {
+    filename: filename,
+    order: order,
+    type: data.type,
+    name: filename.replace(/\.gpx$/i, ''),
+    color: color,
+    distKm: data.distKm,
+    elevM: data.elevM,
+    date: data.date,
+    polyline: polyline,
+    latLngs: data.latLngs
+  };
+}
+
+function resortRides() {
+  rides.sort(function(a, b) { return a.order - b.order; });
+  rides.forEach(function(r, i) { r.id = i; });
+}
+
+function renderEverything() {
+  updateStats();
+  renderRouteList();
+  if (rides.length) {
+    placeCurrentMarker();
+    placeStartMarker();
+  }
 }
 
 // ── Load all routes ────────────────────────────────────────────────────────
+// Two-phase load: paint instantly from whatever's cached (or fetch fresh for
+// anything never seen before), then quietly re-check every cached file
+// against the server and swap in updates if the file on disk has changed.
 function loadAllRoutes() {
+  var ridesByFile = {};
+
   fetch(MANIFEST + '?' + Date.now())
     .then(function(res) {
       if (!res.ok) throw new Error('manifest.json not found, status: ' + res.status);
       return res.json();
     })
     .then(function(manifest) {
-      var promises = manifest.map(function(filename, idx) {
-        return fetchWithCache('./Routes/' + filename)
-          .then(function(gpxText) {
-            if (!gpxText) return null;
-            var data = parseGPX(gpxText);
-            if (!data || data.latLngs.length < 2) return null;
-            // Chronological order comes from the GPX's own timestamp; routes
-            // without a <time> tag fall back to their position in manifest.json.
-            var order = (data.date && !isNaN(data.date)) ? data.date.getTime() : idx;
-            return { filename: filename, data: data, order: order, type: data.type };
+      var toRevalidate = []; // entries that came from cache and should be double-checked
+
+      var firstPaint = manifest.map(function(filename, idx) {
+        var key = 'gpx:' + filename;
+        var cachedText = readCache(key);
+
+        if (cachedText) {
+          toRevalidate.push({ filename: filename, idx: idx, key: key, cachedText: cachedText });
+          return { filename: filename, idx: idx, text: cachedText };
+        }
+
+        return fetch(routeUrl(filename))
+          .then(function(res) { return res.ok ? res.text() : null; })
+          .then(function(text) {
+            if (text) writeCache(key, text);
+            return { filename: filename, idx: idx, text: text };
           })
-          .catch(function() { return null; });
+          .catch(function() { return { filename: filename, idx: idx, text: null }; });
       });
 
-      return Promise.all(promises);
-    })
-    .then(function(results) {
-      if (!results) return;
-      results
-        .filter(function(r) { return r !== null; })
-        .sort(function(a, b) { return a.order - b.order; })
-        .forEach(function(r) {
-          var color    = TYPE_COLORS[r.type] || TYPE_COLORS.walk;
-          var polyline = L.polyline(r.data.latLngs, { color: color, weight: 3.5, opacity: 0.9, lineJoin: 'round' }).addTo(map);
-          rides.push({
-            id: rides.length,
-            filename: r.filename,
-            order: r.order,
-            type: r.type,
-            name: r.data.name || r.filename.replace(/\.gpx$/i,''),
-            color: color,
-            distKm: r.data.distKm,
-            elevM: r.data.elevM,
-            date: r.data.date,
-            polyline: polyline,
-            latLngs: r.data.latLngs
-          });
+      return Promise.all(firstPaint).then(function(results) {
+        results.filter(function(r) { return r.text; }).forEach(function(r) {
+          var ride = buildRide(r.filename, r.idx, r.text);
+          if (!ride) return;
+          rides.push(ride);
+          ridesByFile[r.filename] = ride;
         });
-
-      updateStats();
-      renderRouteList();
-
-      if (rides.length) {
-        var allPts = [];
-        rides.forEach(function(r) { allPts = allPts.concat(r.latLngs); });
-        //map.fitBounds(L.latLngBounds(allPts).pad(0.08));
-        placeCurrentMarker();
-        placeStartMarker();
-      }
+        resortRides();
+        renderEverything();
+        revalidateInBackground(toRevalidate, ridesByFile);
+      });
     })
     .catch(function(e) { console.error('FATAL loadAllRoutes:', e.message, e.stack); });
+}
+
+function revalidateInBackground(entries, ridesByFile) {
+  if (!entries.length) return;
+  var anyChanged = false;
+
+  var checks = entries.map(function(e) {
+    return fetch(routeUrl(e.filename))
+      .then(function(res) { return res.ok ? res.text() : null; })
+      .then(function(freshText) {
+        if (!freshText || freshText === e.cachedText) return;
+        writeCache(e.key, freshText);
+        var newRide = buildRide(e.filename, e.idx, freshText);
+        if (!newRide) return;
+        var oldRide = ridesByFile[e.filename];
+        if (oldRide) {
+          map.removeLayer(oldRide.polyline);
+          rides[rides.indexOf(oldRide)] = newRide;
+        } else {
+          rides.push(newRide);
+        }
+        ridesByFile[e.filename] = newRide;
+        anyChanged = true;
+      })
+      .catch(function() {});
+  });
+
+  Promise.all(checks).then(function() {
+    if (anyChanged) {
+      resortRides();
+      renderEverything();
+    }
+  });
 }
 
 // ── Sidebar toggle ─────────────────────────────────────────────────────────

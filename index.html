@@ -625,6 +625,8 @@ function stopAnimation() {
   animLayers.forEach(function(l) { map.removeLayer(l); });
   animLayers = [];
   applyVisibilityStyles();
+  placeCurrentMarker();
+  placeStartMarker();
   var btn = document.getElementById('play-btn');
   btn.innerHTML = '&#9654;';
   btn.title = 'Play route animation';
@@ -642,6 +644,10 @@ function playAnimation() {
   btn.classList.add('playing');
 
   visible.forEach(function(r) { r.polyline.setStyle({ opacity: 0 }); });
+  // Hide the static start/current-position markers so only the moving
+  // traveler marker is visible while the animation plays.
+  if (currentMarker) { map.removeLayer(currentMarker); currentMarker = null; }
+  //if (startMarker)   { map.removeLayer(startMarker);   startMarker   = null; }
 
   function travelerIcon(type) {
     return L.divIcon({ className: '', html: '<div class="current-marker">' + (TYPE_EMOJI[type] || TYPE_EMOJI.walk) + '</div>', iconAnchor: [0, 0] });

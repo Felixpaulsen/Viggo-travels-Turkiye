@@ -92,6 +92,36 @@
     .play-btn:hover { background: #21262d; transform: scale(1.05); }
     .play-btn.playing { color: var(--accent); }
 
+    .record-btn {
+      position: absolute; bottom: 46px; right: 72px;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--panel); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 1000; color: var(--text); font-size: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.5);
+      transition: background .15s, transform .15s;
+    }
+    .record-btn:hover { background: #21262d; transform: scale(1.05); }
+    .record-btn.recording { color: #f85149; }
+    .record-btn.recording::after {
+      content: ''; position: absolute; top: -3px; right: -3px;
+      width: 12px; height: 12px; border-radius: 50%; background: #f85149;
+      box-shadow: 0 0 0 2px var(--bg); animation: rec-pulse 1s infinite;
+    }
+    @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+    .follow-toggle {
+      position: absolute; bottom: 46px; right: 128px;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--panel); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 1000; color: var(--muted); font-size: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.5);
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    .follow-toggle:hover { background: #21262d; }
+    .follow-toggle.active { color: var(--accent); border-color: var(--accent); }
+
     .legend { display: flex; gap: 16px; margin-bottom: 16px; }
     .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
     .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
@@ -169,6 +199,8 @@
   </aside>
   <div class="map-wrap">
     <div id="map"></div>
+    <div class="follow-toggle" id="follow-toggle" title="Follow the traveler while animating">&#127919;</div>
+    <div class="record-btn" id="record-btn" title="Record animation as a video">&#128249;</div>
     <div class="play-btn" id="play-btn" title="Play route animation">&#9654;</div>
   </div>
 </div>
@@ -618,6 +650,12 @@ function revalidateInBackground(entries, ridesByFile) {
 // the normal static view.
 var animating = false;
 var animLayers = [];
+var followEnabled = false;
+
+document.getElementById('follow-toggle').addEventListener('click', function() {
+  followEnabled = !followEnabled;
+  this.classList.toggle('active', followEnabled);
+});
 
 function stopAnimation() {
   if (!animating) return;
@@ -631,6 +669,7 @@ function stopAnimation() {
   btn.innerHTML = '&#9654;';
   btn.title = 'Play route animation';
   btn.classList.remove('playing');
+  if (recording) stopRecording();
 }
 
 function playAnimation() {
@@ -676,7 +715,9 @@ function playAnimation() {
       var count = Math.max(2, Math.round(pts.length * progress));
       var slice = pts.slice(0, count);
       animLine.setLatLngs(slice);
-      traveler.setLatLng(slice[slice.length - 1]);
+      var head = slice[slice.length - 1];
+      traveler.setLatLng(head);
+      if (followEnabled) map.setView(head, map.getZoom(), { animate: false });
       if (progress < 1) {
         requestAnimationFrame(frame);
       } else {
@@ -691,6 +732,142 @@ function playAnimation() {
 
 document.getElementById('play-btn').addEventListener('click', function() {
   if (animating) stopAnimation(); else playAnimation();
+});
+
+// ── Video export ───────────────────────────────────────────────────────────
+// Records the animation as a downloadable video using the browser's own
+// screen/tab-capture API (getDisplayMedia) + MediaRecorder — no server or
+// external tools needed. The sidebar is temporarily collapsed so the
+// recording is just the map, requested at up to 1920x1080/30fps (the actual
+// captured resolution depends on the browser and how big the window/tab is,
+// so for the sharpest result, maximize the browser window first).
+var recording = false;
+var mediaRecorder = null;
+var recordedChunks = [];
+
+function updateRecordBtn(active) {
+  var btn = document.getElementById('record-btn');
+  btn.classList.toggle('recording', active);
+  btn.title = active ? 'Recording… click to stop' : 'Record animation as a video';
+}
+
+function pickMimeType() {
+  var candidates = [
+    'video/mp4;codecs=avc1',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
+  }
+  return '';
+}
+
+function setSidebarCollapsed(collapsed) {
+  var sidebar = document.getElementById('sidebar');
+  var toggle  = document.getElementById('sidebar-toggle');
+  if (sidebar.classList.contains('collapsed') === collapsed) return;
+  sidebar.classList.toggle('collapsed');
+  toggle.classList.toggle('collapsed');
+  setTimeout(function() { map.invalidateSize(); }, 260);
+}
+
+function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    alert("Your browser doesn't support screen recording (getDisplayMedia), so video export isn't available here. Try a recent Chrome, Edge, or Firefox.");
+    return;
+  }
+  if (!window.MediaRecorder) {
+    alert("Your browser doesn't support MediaRecorder, so video export isn't available here.");
+    return;
+  }
+
+  var sidebarWasVisible = !document.getElementById('sidebar').classList.contains('collapsed');
+  if (sidebarWasVisible) setSidebarCollapsed(true);
+
+  // Give the sidebar-collapse transition + map resize a moment to settle
+  // before the capture picker opens, so the very first frames are correct.
+  setTimeout(function() {
+    var displayOpts = {
+      video: { frameRate: 30, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+      preferCurrentTab: true,   // Chrome-only hint to simplify the picker; harmless elsewhere
+      selfBrowserSurface: 'include'
+    };
+
+    navigator.mediaDevices.getDisplayMedia(displayOpts).then(function(stream) {
+      var mimeType = pickMimeType();
+      recordedChunks = [];
+      try {
+        mediaRecorder = mimeType
+          ? new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: 8000000 })
+          : new MediaRecorder(stream);
+      } catch (e) {
+        alert('Could not start the recorder: ' + e.message);
+        stream.getTracks().forEach(function(t) { t.stop(); });
+        if (sidebarWasVisible) setSidebarCollapsed(false);
+        return;
+      }
+
+      mediaRecorder.ondataavailable = function(e) {
+        if (e.data && e.data.size) recordedChunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = function() {
+        stream.getTracks().forEach(function(t) { t.stop(); });
+        recording = false;
+        updateRecordBtn(false);
+        if (sidebarWasVisible) setSidebarCollapsed(false);
+        if (!recordedChunks.length) return;
+        var blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/webm' });
+        var ext  = (mediaRecorder.mimeType || '').indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+        var url  = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'route-animation.' + ext;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+      };
+
+      // If the person stops sharing via the browser's own UI instead of our button.
+      stream.getVideoTracks()[0].addEventListener('ended', function() {
+        if (recording) stopRecording();
+      });
+
+      recording = true;
+      updateRecordBtn(true);
+      mediaRecorder.start();
+
+      if (!animating) playAnimation();
+    }).catch(function(err) {
+      if (sidebarWasVisible) setSidebarCollapsed(false);
+      if (err && err.name !== 'NotAllowedError') {
+        alert('Screen recording could not start: ' + err.message);
+      }
+    });
+  }, 300);
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  } else {
+    recording = false;
+    updateRecordBtn(false);
+  }
+}
+
+document.getElementById('record-btn').addEventListener('click', function() {
+  if (recording) {
+    stopRecording();
+    if (animating) stopAnimation();
+  } else {
+    startRecording();
+  }
 });
 
 // ── Sidebar toggle ─────────────────────────────────────────────────────────

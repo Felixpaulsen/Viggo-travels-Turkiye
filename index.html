@@ -11,6 +11,7 @@
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.20/leaflet-maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5/build/mp4-muxer.min.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -80,6 +81,16 @@
     }
     .day-reset-btn:hover { color: var(--text); border-color: var(--muted); }
 
+    .export-panel { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+    .export-row { display: flex; align-items: center; gap: 8px; }
+    .export-row label { font-size: 12px; color: var(--muted); }
+    .export-row input {
+      width: 64px; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+      font-size: 12px; font-family: 'Inter', sans-serif;
+    }
+    .export-status { font-size: 11px; color: var(--muted); margin-top: 8px; min-height: 14px; }
+
     .play-btn {
       position: absolute; bottom: 46px; right: 16px;
       width: 48px; height: 48px; border-radius: 50%;
@@ -102,13 +113,8 @@
       transition: background .15s, transform .15s;
     }
     .record-btn:hover { background: #21262d; transform: scale(1.05); }
-    .record-btn.recording { color: #f85149; }
-    .record-btn.recording::after {
-      content: ''; position: absolute; top: -3px; right: -3px;
-      width: 12px; height: 12px; border-radius: 50%; background: #f85149;
-      box-shadow: 0 0 0 2px var(--bg); animation: rec-pulse 1s infinite;
-    }
-    @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+    .record-btn.exporting { color: #f85149; cursor: default; }
+    .record-btn.exporting:hover { transform: none; }
 
     .follow-toggle {
       position: absolute; bottom: 46px; right: 128px;
@@ -188,6 +194,15 @@
         <button type="button" id="day-reset" class="day-reset-btn" title="Show all days">All</button>
       </div>
     </div>
+    <div class="export-panel">
+      <div class="section-label">Video export</div>
+      <div class="export-row">
+        <label for="export-duration">Duration</label>
+        <input type="number" id="export-duration" min="1" max="600" step="1" value="12" />
+        <span class="day-filter-sep">sec</span>
+      </div>
+      <div class="export-status" id="export-status"></div>
+    </div>
     <div class="routes">
       <div class="section-label">Routes</div>
       <div class="legend">
@@ -207,9 +222,10 @@
 
 <script>
 // ── Map ────────────────────────────────────────────────────────────────────
+var CARTO_STYLE_URL = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json?key=__CARTO_API_KEY__';
 var map = L.map('map', { center: [39.245472, 35.487361], zoom: 6, minZoom: 1 });
 L.maplibreGL({
-  style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json?key=__CARTO_API_KEY__',
+  style: CARTO_STYLE_URL,
   attribution: '&copy; <a href="https://carto.com/">CARTO</a>, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);
 
@@ -669,7 +685,6 @@ function stopAnimation() {
   btn.innerHTML = '&#9654;';
   btn.title = 'Play route animation';
   btn.classList.remove('playing');
-  if (recording) stopRecording();
 }
 
 function playAnimation() {
@@ -735,140 +750,217 @@ document.getElementById('play-btn').addEventListener('click', function() {
 });
 
 // ── Video export ───────────────────────────────────────────────────────────
-// Records the animation as a downloadable video using the browser's own
-// screen/tab-capture API (getDisplayMedia) + MediaRecorder — no server or
-// external tools needed. The sidebar is temporarily collapsed so the
-// recording is just the map, requested at up to 1920x1080/30fps (the actual
-// captured resolution depends on the browser and how big the window/tab is,
-// so for the sharpest result, maximize the browser window first).
-var recording = false;
-var mediaRecorder = null;
-var recordedChunks = [];
+// Renders the animation directly to an MP4 file — no screen/tab capture, so
+// there's no cursor, browser UI, or sidebar in the output. It works by
+// spinning up a second, invisible map fixed at exactly 1920x1080, drawing
+// each frame onto an offscreen canvas (basemap + route lines + traveler,
+// all placed by projecting lat/lng through that hidden map), and encoding
+// the frames with the browser's native WebCodecs VideoEncoder. Because we
+// generate frames rather than capture them in real time, the output's
+// length is exactly whatever duration is entered — not tied to how long
+// rendering actually takes on this machine.
+var EXPORT_WIDTH  = 1920;
+var EXPORT_HEIGHT = 1080;
+var EXPORT_FPS    = 30;
+var exporting = false;
 
-function updateRecordBtn(active) {
+function setExportStatus(msg) {
+  document.getElementById('export-status').textContent = msg || '';
+}
+
+function updateExportBtn(active) {
   var btn = document.getElementById('record-btn');
-  btn.classList.toggle('recording', active);
-  btn.title = active ? 'Recording… click to stop' : 'Record animation as a video';
+  btn.classList.toggle('exporting', active);
+  btn.title = active ? 'Rendering video…' : 'Export animation as a video';
 }
 
-function pickMimeType() {
-  var candidates = [
-    'video/mp4;codecs=avc1',
-    'video/mp4',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm'
-  ];
-  for (var i = 0; i < candidates.length; i++) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
-  }
-  return '';
+// Builds a hidden map (same basemap style, no controls) at the export
+// resolution, used purely as a coordinate/render source — never shown.
+function createExportMap() {
+  var container = document.createElement('div');
+  container.style.position = 'fixed';
+  container.style.left = '-99999px';
+  container.style.top = '0';
+  container.style.width = EXPORT_WIDTH + 'px';
+  container.style.height = EXPORT_HEIGHT + 'px';
+  document.body.appendChild(container);
+
+  var exportMap = L.map(container, {
+    zoomControl: false, attributionControl: false,
+    fadeAnimation: false, zoomAnimation: false, inertia: false,
+    center: map.getCenter(), zoom: map.getZoom()
+  });
+  var glLayer = L.maplibreGL({ style: CARTO_STYLE_URL }).addTo(exportMap);
+
+  return { leafletMap: exportMap, glLayer: glLayer, container: container };
 }
 
-function setSidebarCollapsed(collapsed) {
-  var sidebar = document.getElementById('sidebar');
-  var toggle  = document.getElementById('sidebar-toggle');
-  if (sidebar.classList.contains('collapsed') === collapsed) return;
-  sidebar.classList.toggle('collapsed');
-  toggle.classList.toggle('collapsed');
-  setTimeout(function() { map.invalidateSize(); }, 260);
+function destroyExportMap(em) {
+  em.leafletMap.remove();
+  if (em.container.parentNode) em.container.parentNode.removeChild(em.container);
 }
 
-function startRecording() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    alert("Your browser doesn't support screen recording (getDisplayMedia), so video export isn't available here. Try a recent Chrome, Edge, or Firefox.");
+// Waits a couple of animation frames so MapLibre GL has actually painted
+// after a camera move, before we grab pixels from its canvas.
+function nextPaint() {
+  return new Promise(function(resolve) {
+    requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+  });
+}
+
+async function exportVideo() {
+  if (exporting) return;
+  if (!window.VideoEncoder || !window.Mp4Muxer) {
+    alert("Your browser doesn't support the WebCodecs API needed to render video here. Try a recent Chrome, Edge, or Safari (16.4+).");
     return;
   }
-  if (!window.MediaRecorder) {
-    alert("Your browser doesn't support MediaRecorder, so video export isn't available here.");
-    return;
+  var visible = getVisibleRides().slice().sort(function(a, b) { return a.order - b.order; });
+  if (!visible.length) { alert('No routes are currently visible to export.'); return; }
+
+  var durationInput = document.getElementById('export-duration');
+  var duration = Math.max(1, parseFloat(durationInput.value) || 12);
+  var totalFrames = Math.max(1, Math.round(duration * EXPORT_FPS));
+
+  exporting = true;
+  updateExportBtn(true);
+  setExportStatus('Preparing…');
+
+  // Allocate time per route proportional to its distance, so longer legs
+  // get proportionally more of the fixed total duration.
+  var weights = visible.map(function(r) { return Math.max(r.distKm, 0.05); });
+  var totalWeight = weights.reduce(function(s, w) { return s + w; }, 0);
+  var routeStart = []; // fraction of total duration where each route begins
+  var acc = 0;
+  weights.forEach(function(w) { routeStart.push(acc / totalWeight); acc += w; });
+  routeStart.push(1);
+
+  var allPts = [];
+  visible.forEach(function(r) { allPts = allPts.concat(r.latLngs); });
+  var bounds = L.latLngBounds(allPts);
+
+  var em = createExportMap();
+  if (!followEnabled) {
+    em.leafletMap.fitBounds(bounds.pad(0.08), { animate: false });
+  }
+  await nextPaint();
+
+  var canvas = document.createElement('canvas');
+  canvas.width = EXPORT_WIDTH;
+  canvas.height = EXPORT_HEIGHT;
+  var ctx = canvas.getContext('2d');
+
+  var muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: { codec: 'avc', width: EXPORT_WIDTH, height: EXPORT_HEIGHT },
+    fastStart: 'in-memory'
+  });
+
+  var encoder = new VideoEncoder({
+    output: function(chunk, meta) { muxer.addVideoChunk(chunk, meta); },
+    error: function(e) { console.error('VideoEncoder error:', e); }
+  });
+  encoder.configure({
+    codec: 'avc1.42001f',
+    width: EXPORT_WIDTH,
+    height: EXPORT_HEIGHT,
+    bitrate: 10_000_000,
+    framerate: EXPORT_FPS
+  });
+
+  function travelerEmoji(type) { return TYPE_EMOJI[type] || TYPE_EMOJI.walk; }
+
+  function findActiveIndex(progress) {
+    for (var i = 0; i < visible.length; i++) {
+      if (progress < routeStart[i + 1] || i === visible.length - 1) return i;
+    }
+    return visible.length - 1;
   }
 
-  var sidebarWasVisible = !document.getElementById('sidebar').classList.contains('collapsed');
-  if (sidebarWasVisible) setSidebarCollapsed(true);
+  try {
+    for (var f = 0; f < totalFrames; f++) {
+      var progress = totalFrames === 1 ? 1 : f / (totalFrames - 1);
+      var activeIdx = findActiveIndex(progress);
+      var activeRoute = visible[activeIdx];
+      var localSpan = routeStart[activeIdx + 1] - routeStart[activeIdx];
+      var localProgress = localSpan > 0 ? Math.min(1, Math.max(0, (progress - routeStart[activeIdx]) / localSpan)) : 1;
+      var pts = activeRoute.latLngs;
+      var count = Math.max(2, Math.round(pts.length * localProgress));
+      var headPt = pts[count - 1];
 
-  // Give the sidebar-collapse transition + map resize a moment to settle
-  // before the capture picker opens, so the very first frames are correct.
-  setTimeout(function() {
-    var displayOpts = {
-      video: { frameRate: 30, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
-      preferCurrentTab: true,   // Chrome-only hint to simplify the picker; harmless elsewhere
-      selfBrowserSurface: 'include'
-    };
-
-    navigator.mediaDevices.getDisplayMedia(displayOpts).then(function(stream) {
-      var mimeType = pickMimeType();
-      recordedChunks = [];
-      try {
-        mediaRecorder = mimeType
-          ? new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: 8000000 })
-          : new MediaRecorder(stream);
-      } catch (e) {
-        alert('Could not start the recorder: ' + e.message);
-        stream.getTracks().forEach(function(t) { t.stop(); });
-        if (sidebarWasVisible) setSidebarCollapsed(false);
-        return;
+      if (followEnabled) {
+        em.leafletMap.setView(headPt, em.leafletMap.getZoom() || map.getZoom(), { animate: false });
+        await nextPaint();
       }
 
-      mediaRecorder.ondataavailable = function(e) {
-        if (e.data && e.data.size) recordedChunks.push(e.data);
-      };
+      // Composite: basemap, then every fully-completed prior route, then
+      // the active route's partial line, then the traveler marker.
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+      var glCanvas = em.glLayer.getMaplibreMap().getCanvas();
+      ctx.drawImage(glCanvas, 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
 
-      mediaRecorder.onstop = function() {
-        stream.getTracks().forEach(function(t) { t.stop(); });
-        recording = false;
-        updateRecordBtn(false);
-        if (sidebarWasVisible) setSidebarCollapsed(false);
-        if (!recordedChunks.length) return;
-        var blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/webm' });
-        var ext  = (mediaRecorder.mimeType || '').indexOf('mp4') !== -1 ? 'mp4' : 'webm';
-        var url  = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = 'route-animation.' + ext;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
-      };
-
-      // If the person stops sharing via the browser's own UI instead of our button.
-      stream.getVideoTracks()[0].addEventListener('ended', function() {
-        if (recording) stopRecording();
-      });
-
-      recording = true;
-      updateRecordBtn(true);
-      mediaRecorder.start();
-
-      if (!animating) playAnimation();
-    }).catch(function(err) {
-      if (sidebarWasVisible) setSidebarCollapsed(false);
-      if (err && err.name !== 'NotAllowedError') {
-        alert('Screen recording could not start: ' + err.message);
+      for (var i = 0; i <= activeIdx; i++) {
+        var r = visible[i];
+        var slicePts = (i === activeIdx) ? pts.slice(0, count) : r.latLngs;
+        if (slicePts.length < 2) continue;
+        ctx.strokeStyle = r.color;
+        ctx.lineWidth = 5;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (var p = 0; p < slicePts.length; p++) {
+          var sp = em.leafletMap.latLngToContainerPoint(slicePts[p]);
+          if (p === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
+        }
+        ctx.stroke();
       }
-    });
-  }, 300);
-}
 
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  } else {
-    recording = false;
-    updateRecordBtn(false);
+      var headScreen = em.leafletMap.latLngToContainerPoint(headPt);
+      ctx.font = '44px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(travelerEmoji(activeRoute.type), headScreen.x, headScreen.y);
+
+      var frame = new VideoFrame(canvas, { timestamp: Math.round(f * (1e6 / EXPORT_FPS)) });
+      encoder.encode(frame);
+      frame.close();
+
+      while (encoder.encodeQueueSize > 4) {
+        await new Promise(function(r) { setTimeout(r, 10); });
+      }
+
+      if (f % 5 === 0 || f === totalFrames - 1) {
+        setExportStatus('Rendering… ' + Math.round(((f + 1) / totalFrames) * 100) + '%');
+      }
+    }
+
+    setExportStatus('Finishing up…');
+    await encoder.flush();
+    muxer.finalize();
+
+    var blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'route-animation.mp4';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+    setExportStatus('Done — video downloaded.');
+    setTimeout(function() { setExportStatus(''); }, 4000);
+  } catch (err) {
+    console.error('Video export failed:', err);
+    alert('Video export failed: ' + err.message);
+    setExportStatus('');
+  } finally {
+    destroyExportMap(em);
+    exporting = false;
+    updateExportBtn(false);
   }
 }
 
-document.getElementById('record-btn').addEventListener('click', function() {
-  if (recording) {
-    stopRecording();
-    if (animating) stopAnimation();
-  } else {
-    startRecording();
-  }
-});
+document.getElementById('record-btn').addEventListener('click', exportVideo);
 
 // ── Sidebar toggle ─────────────────────────────────────────────────────────
 document.getElementById('sidebar-toggle').addEventListener('click', function() {

@@ -12,6 +12,7 @@
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.20/leaflet-maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5/build/mp4-muxer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/webm-muxer@5/build/webm-muxer.min.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -808,21 +809,72 @@ function nextPaint() {
   });
 }
 
+// Not every browser that exposes `VideoEncoder` can actually encode every
+// codec (Firefox, notably, has the API but its H.264 encoder isn't
+// functional yet — it fails mid-encode rather than reporting unsupported
+// up front). We probe candidates with isConfigSupported and use the first
+// one that actually works, so we transparently fall back to VP9/WebM.
+var EXPORT_CODEC_CANDIDATES = [
+  { container: 'mp4',  ext: 'mp4',  mime: 'video/mp4',  encoderCodec: 'avc1.42001f',   muxerCodec: 'avc',
+    lib: function() { return window.Mp4Muxer; } },
+  { container: 'webm', ext: 'webm', mime: 'video/webm', encoderCodec: 'vp09.00.10.08', muxerCodec: 'V_VP9',
+    lib: function() { return window.WebMMuxer; } },
+  { container: 'webm', ext: 'webm', mime: 'video/webm', encoderCodec: 'vp8',           muxerCodec: 'V_VP8',
+    lib: function() { return window.WebMMuxer; } }
+];
+
+async function pickExportCodec(width, height) {
+  for (var i = 0; i < EXPORT_CODEC_CANDIDATES.length; i++) {
+    var c = EXPORT_CODEC_CANDIDATES[i];
+    if (!c.lib()) continue;
+    try {
+      var support = await VideoEncoder.isConfigSupported({ codec: c.encoderCodec, width: width, height: height });
+      if (support && support.supported) return c;
+    } catch (e) { /* try next candidate */ }
+  }
+  return null;
+}
+
+function makeMuxer(codecInfo, width, height) {
+  if (codecInfo.container === 'mp4') {
+    return new Mp4Muxer.Muxer({
+      target: new Mp4Muxer.ArrayBufferTarget(),
+      video: { codec: codecInfo.muxerCodec, width: width, height: height },
+      fastStart: 'in-memory'
+    });
+  }
+  return new WebMMuxer.Muxer({
+    target: new WebMMuxer.ArrayBufferTarget(),
+    video: { codec: codecInfo.muxerCodec, width: width, height: height }
+  });
+}
+
 async function exportVideo() {
   if (exporting) return;
-  if (!window.VideoEncoder || !window.Mp4Muxer) {
-    alert("Your browser doesn't support the WebCodecs API needed to render video here. Try a recent Chrome, Edge, or Safari (16.4+).");
+  if (!window.VideoEncoder) {
+    alert("Your browser doesn't support the WebCodecs API needed to render video here. Try a recent Chrome, Edge, Firefox, or Safari (16.4+).");
     return;
   }
   var visible = getVisibleRides().slice().sort(function(a, b) { return a.order - b.order; });
   if (!visible.length) { alert('No routes are currently visible to export.'); return; }
 
+  exporting = true;
+  updateExportBtn(true);
+  setExportStatus('Checking video support…');
+
+  var codecInfo = await pickExportCodec(EXPORT_WIDTH, EXPORT_HEIGHT);
+  if (!codecInfo) {
+    alert("This browser can't actually encode video with WebCodecs (tried H.264 and VP9/VP8), so export isn't available here.");
+    exporting = false;
+    updateExportBtn(false);
+    setExportStatus('');
+    return;
+  }
+
   var durationInput = document.getElementById('export-duration');
   var duration = Math.max(1, parseFloat(durationInput.value) || 12);
   var totalFrames = Math.max(1, Math.round(duration * EXPORT_FPS));
 
-  exporting = true;
-  updateExportBtn(true);
   setExportStatus('Preparing…');
 
   // Allocate time per route proportional to its distance, so longer legs
@@ -849,18 +901,14 @@ async function exportVideo() {
   canvas.height = EXPORT_HEIGHT;
   var ctx = canvas.getContext('2d');
 
-  var muxer = new Mp4Muxer.Muxer({
-    target: new Mp4Muxer.ArrayBufferTarget(),
-    video: { codec: 'avc', width: EXPORT_WIDTH, height: EXPORT_HEIGHT },
-    fastStart: 'in-memory'
-  });
-
+  var muxer = makeMuxer(codecInfo, EXPORT_WIDTH, EXPORT_HEIGHT);
+  var encoderError = null;
   var encoder = new VideoEncoder({
     output: function(chunk, meta) { muxer.addVideoChunk(chunk, meta); },
-    error: function(e) { console.error('VideoEncoder error:', e); }
+    error: function(e) { encoderError = e; }
   });
   encoder.configure({
-    codec: 'avc1.42001f',
+    codec: codecInfo.encoderCodec,
     width: EXPORT_WIDTH,
     height: EXPORT_HEIGHT,
     bitrate: 10_000_000,
@@ -925,9 +973,12 @@ async function exportVideo() {
       encoder.encode(frame);
       frame.close();
 
+      if (encoderError) throw encoderError;
+
       while (encoder.encodeQueueSize > 4) {
         await new Promise(function(r) { setTimeout(r, 10); });
       }
+      if (encoderError) throw encoderError;
 
       if (f % 5 === 0 || f === totalFrames - 1) {
         setExportStatus('Rendering… ' + Math.round(((f + 1) / totalFrames) * 100) + '%');
@@ -936,13 +987,14 @@ async function exportVideo() {
 
     setExportStatus('Finishing up…');
     await encoder.flush();
+    if (encoderError) throw encoderError;
     muxer.finalize();
 
-    var blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    var blob = new Blob([muxer.target.buffer], { type: codecInfo.mime });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'route-animation.mp4';
+    a.download = 'route-animation.' + codecInfo.ext;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

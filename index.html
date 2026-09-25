@@ -1055,7 +1055,7 @@ async function exportVideo() {
 
       if (followEnabled) {
         em.leafletMap.setView(headPt, em.leafletMap.getZoom(), { animate: false });
-        await waitForMapIdle(mlMap, 2000);
+        await waitForMapIdle(mlMap, 150);
       }
 
       compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type);
@@ -1081,7 +1081,7 @@ async function exportVideo() {
         var eased = 1 - Math.pow(1 - zp, 3); // ease-out cubic
         var zoomNow = startZoom - (startZoom - endZoom) * eased;
         em.leafletMap.setView(centerPt, zoomNow, { animate: false });
-        await waitForMapIdle(mlMap, 1500);
+        await waitForMapIdle(mlMap, 150);
 
         compositeAndEncode(totalFrames + z, visible, null, headPt, activeRoute.type);
         await checkBackpressure();

@@ -794,6 +794,7 @@ function createExportMap() {
   var exportMap = L.map(container, {
     zoomControl: false, attributionControl: false,
     fadeAnimation: false, zoomAnimation: false, inertia: false,
+    zoomSnap: 0, zoomDelta: 0.25, // continuous zoom — no snapping to whole levels
     center: map.getCenter(), zoom: map.getZoom()
   });
   var glLayer = L.maplibreGL({ style: CARTO_STYLE_URL }).addTo(exportMap);

@@ -802,6 +802,21 @@ function createExportMap() {
   return { leafletMap: exportMap, glLayer: glLayer, container: container };
 }
 
+// Fits `bounds` so it occupies exactly `targetFraction` of the frame's
+// width or height (whichever the bounds' aspect ratio is constrained by),
+// centered, using real pixel padding rather than Leaflet's approximate
+// .pad() percentage (which pads relative to the bounds, not the frame).
+function fitBoundsToFraction(leafletMap, bounds, frameW, frameH, targetFraction) {
+  var marginFraction = (1 - targetFraction) / 2;
+  var padX = frameW * marginFraction;
+  var padY = frameH * marginFraction;
+  leafletMap.fitBounds(bounds, {
+    paddingTopLeft: [padX, padY],
+    paddingBottomRight: [padX, padY],
+    animate: false
+  });
+}
+
 function destroyExportMap(em) {
   em.leafletMap.remove();
   if (em.container.parentNode) em.container.parentNode.removeChild(em.container);
@@ -952,9 +967,7 @@ async function exportVideo() {
   var em = createExportMap();
   var mlMap = em.glLayer.getMaplibreMap();
   await waitForMapLoad(mlMap);
-  if (!followEnabled) {
-    em.leafletMap.fitBounds(bounds.pad(0.08), { animate: false });
-  }
+  fitBoundsToFraction(em.leafletMap, bounds, EXPORT_WIDTH, EXPORT_HEIGHT, 0.8);
   await waitForMapIdle(mlMap, 8000);
 
   var canvas = document.createElement('canvas');
@@ -1084,6 +1097,14 @@ async function exportVideo() {
         await waitForMapIdle(mlMap, 150);
 
         compositeAndEncode(totalFrames + z, visible, null, headPt, activeRoute.type);
+        await checkBackpressure();
+      }
+
+      // Hold on the final zoomed-out view for 2 seconds before finishing.
+      setExportStatus('Holding…');
+      var holdFrames = Math.max(1, Math.round(2 * EXPORT_FPS));
+      for (var h = 0; h < holdFrames; h++) {
+        compositeAndEncode(totalFrames + outroFrames + h, visible, null, headPt, activeRoute.type);
         await checkBackpressure();
       }
     }

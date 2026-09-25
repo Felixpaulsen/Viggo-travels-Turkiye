@@ -830,10 +830,11 @@ function waitForMapLoad(maplibreMap, timeoutMs) {
 }
 
 // Not every browser that exposes `VideoEncoder` can actually encode every
-// codec (Firefox, notably, has the API but its H.264 encoder isn't
-// functional yet — it fails mid-encode rather than reporting unsupported
-// up front). We probe candidates with isConfigSupported and use the first
-// one that actually works, so we transparently fall back to VP9/WebM.
+// codec (Firefox, notably, has the API and can even report a codec as
+// "supported", but then fails partway through real use). So rather than
+// trusting isConfigSupported alone, we actually configure a throwaway
+// encoder and push one real frame through it for each candidate, and only
+// commit to the first one that genuinely works end to end.
 var EXPORT_CODEC_CANDIDATES = [
   { container: 'mp4',  ext: 'mp4',  mime: 'video/mp4',  encoderCodec: 'avc1.42001f',   muxerCodec: 'avc',
     lib: function() { return window.Mp4Muxer; } },
@@ -843,14 +844,50 @@ var EXPORT_CODEC_CANDIDATES = [
     lib: function() { return window.WebMMuxer; } }
 ];
 
+function testEncodeOneFrame(codecStr, width, height) {
+  return new Promise(function(resolve) {
+    var settled = false;
+    function finish(ok) { if (!settled) { settled = true; resolve(ok); } }
+    var safetyTimer = setTimeout(function() { finish(false); }, 3000);
+
+    try {
+      var testEncoder = new VideoEncoder({
+        output: function() {},
+        error: function() { finish(false); }
+      });
+      testEncoder.configure({ codec: codecStr, width: width, height: height, bitrate: 1000000, framerate: 30 });
+
+      var testCanvas = document.createElement('canvas');
+      testCanvas.width = width;
+      testCanvas.height = height;
+      testCanvas.getContext('2d').fillRect(0, 0, width, height);
+
+      var testFrame = new VideoFrame(testCanvas, { timestamp: 0 });
+      testEncoder.encode(testFrame);
+      testFrame.close();
+
+      testEncoder.flush().then(function() {
+        clearTimeout(safetyTimer);
+        try { testEncoder.close(); } catch (e) {}
+        finish(true);
+      }).catch(function() { finish(false); });
+    } catch (e) {
+      finish(false);
+    }
+  });
+}
+
 async function pickExportCodec(width, height) {
   for (var i = 0; i < EXPORT_CODEC_CANDIDATES.length; i++) {
     var c = EXPORT_CODEC_CANDIDATES[i];
     if (!c.lib()) continue;
     try {
       var support = await VideoEncoder.isConfigSupported({ codec: c.encoderCodec, width: width, height: height });
-      if (support && support.supported) return c;
-    } catch (e) { /* try next candidate */ }
+      if (!support || !support.supported) continue;
+    } catch (e) { continue; }
+
+    var works = await testEncodeOneFrame(c.encoderCodec, width, height);
+    if (works) return c;
   }
   return null;
 }
@@ -937,6 +974,17 @@ async function exportVideo() {
     bitrate: 10_000_000,
     framerate: EXPORT_FPS
   });
+  // Give configure() a moment to settle (it can fail asynchronously) before
+  // committing to the frame-render loop.
+  await new Promise(function(r) { setTimeout(r, 50); });
+  if (encoderError) {
+    destroyExportMap(em);
+    exporting = false;
+    updateExportBtn(false);
+    setExportStatus('');
+    alert('Video export failed to start: ' + (encoderError.message || encoderError) + '\n\nThis can happen if the browser reports a codec as supported but can\'t actually use it. Try again — if it keeps happening, it may not be fixable in this browser.');
+    return;
+  }
 
   function travelerEmoji(type) { return TYPE_EMOJI[type] || TYPE_EMOJI.walk; }
 

@@ -202,6 +202,11 @@
         <input type="number" id="export-duration" min="1" max="600" step="1" value="12" />
         <span class="day-filter-sep">sec</span>
       </div>
+      <div class="export-row" style="margin-top:10px;">
+        <label for="export-zoomout">Zoom out at end</label>
+        <input type="number" id="export-zoomout" min="0" max="10" step="0.5" value="0" />
+        <span class="day-filter-sep">levels</span>
+      </div>
       <div class="export-status" id="export-status"></div>
     </div>
     <div class="routes">
@@ -801,11 +806,26 @@ function destroyExportMap(em) {
   if (em.container.parentNode) em.container.parentNode.removeChild(em.container);
 }
 
-// Waits a couple of animation frames so MapLibre GL has actually painted
-// after a camera move, before we grab pixels from its canvas.
-function nextPaint() {
+// Waits until the hidden map's underlying MapLibre instance has actually
+// finished loading and rendering the current view (style + tiles), rather
+// than just waiting a fixed number of frames — this is what was causing the
+// first couple of exported frames to show an unrendered/blank map.
+function waitForMapIdle(maplibreMap, timeoutMs) {
   return new Promise(function(resolve) {
-    requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+    var done = false;
+    function finish() { if (!done) { done = true; resolve(); } }
+    maplibreMap.once('idle', finish);
+    setTimeout(finish, timeoutMs || 4000); // safety net if 'idle' never fires
+  });
+}
+
+function waitForMapLoad(maplibreMap, timeoutMs) {
+  return new Promise(function(resolve) {
+    if (maplibreMap.loaded && maplibreMap.loaded()) { resolve(); return; }
+    var done = false;
+    function finish() { if (!done) { done = true; resolve(); } }
+    maplibreMap.once('load', finish);
+    setTimeout(finish, timeoutMs || 6000);
   });
 }
 
@@ -874,6 +894,7 @@ async function exportVideo() {
   var durationInput = document.getElementById('export-duration');
   var duration = Math.max(1, parseFloat(durationInput.value) || 12);
   var totalFrames = Math.max(1, Math.round(duration * EXPORT_FPS));
+  var zoomOutAmount = Math.max(0, parseFloat(document.getElementById('export-zoomout').value) || 0);
 
   setExportStatus('Preparing…');
 
@@ -891,10 +912,12 @@ async function exportVideo() {
   var bounds = L.latLngBounds(allPts);
 
   var em = createExportMap();
+  var mlMap = em.glLayer.getMaplibreMap();
+  await waitForMapLoad(mlMap);
   if (!followEnabled) {
     em.leafletMap.fitBounds(bounds.pad(0.08), { animate: false });
   }
-  await nextPaint();
+  await waitForMapIdle(mlMap, 8000);
 
   var canvas = document.createElement('canvas');
   canvas.width = EXPORT_WIDTH;
@@ -924,64 +947,95 @@ async function exportVideo() {
     return visible.length - 1;
   }
 
+  // Draws one frame (basemap + given route lines + traveler marker) and
+  // hands it to the encoder. `partial` is optional: { route, count }.
+  function compositeAndEncode(frameIndex, fullRoutes, partial, headLatLng, headType) {
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+    ctx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+
+    function strokeLine(pts, color) {
+      if (pts.length < 2) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (var p = 0; p < pts.length; p++) {
+        var sp = em.leafletMap.latLngToContainerPoint(pts[p]);
+        if (p === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
+      }
+      ctx.stroke();
+    }
+
+    fullRoutes.forEach(function(r) { strokeLine(r.latLngs, r.color); });
+    if (partial) strokeLine(partial.route.latLngs.slice(0, partial.count), partial.route.color);
+
+    if (headLatLng) {
+      var headScreen = em.leafletMap.latLngToContainerPoint(headLatLng);
+      ctx.font = '44px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(travelerEmoji(headType), headScreen.x, headScreen.y);
+    }
+
+    var frame = new VideoFrame(canvas, { timestamp: Math.round(frameIndex * (1e6 / EXPORT_FPS)) });
+    encoder.encode(frame);
+    frame.close();
+  }
+
+  async function checkBackpressure() {
+    if (encoderError) throw encoderError;
+    while (encoder.encodeQueueSize > 4) {
+      await new Promise(function(r) { setTimeout(r, 10); });
+    }
+    if (encoderError) throw encoderError;
+  }
+
   try {
+    var headPt, activeRoute;
     for (var f = 0; f < totalFrames; f++) {
       var progress = totalFrames === 1 ? 1 : f / (totalFrames - 1);
       var activeIdx = findActiveIndex(progress);
-      var activeRoute = visible[activeIdx];
+      activeRoute = visible[activeIdx];
       var localSpan = routeStart[activeIdx + 1] - routeStart[activeIdx];
       var localProgress = localSpan > 0 ? Math.min(1, Math.max(0, (progress - routeStart[activeIdx]) / localSpan)) : 1;
       var pts = activeRoute.latLngs;
       var count = Math.max(2, Math.round(pts.length * localProgress));
-      var headPt = pts[count - 1];
+      headPt = pts[count - 1];
 
       if (followEnabled) {
-        em.leafletMap.setView(headPt, em.leafletMap.getZoom() || map.getZoom(), { animate: false });
-        await nextPaint();
+        em.leafletMap.setView(headPt, em.leafletMap.getZoom(), { animate: false });
+        await waitForMapIdle(mlMap, 2000);
       }
 
-      // Composite: basemap, then every fully-completed prior route, then
-      // the active route's partial line, then the traveler marker.
-      ctx.fillStyle = '#0d1117';
-      ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
-      var glCanvas = em.glLayer.getMaplibreMap().getCanvas();
-      ctx.drawImage(glCanvas, 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
-
-      for (var i = 0; i <= activeIdx; i++) {
-        var r = visible[i];
-        var slicePts = (i === activeIdx) ? pts.slice(0, count) : r.latLngs;
-        if (slicePts.length < 2) continue;
-        ctx.strokeStyle = r.color;
-        ctx.lineWidth = 5;
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        for (var p = 0; p < slicePts.length; p++) {
-          var sp = em.leafletMap.latLngToContainerPoint(slicePts[p]);
-          if (p === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
-        }
-        ctx.stroke();
-      }
-
-      var headScreen = em.leafletMap.latLngToContainerPoint(headPt);
-      ctx.font = '44px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(travelerEmoji(activeRoute.type), headScreen.x, headScreen.y);
-
-      var frame = new VideoFrame(canvas, { timestamp: Math.round(f * (1e6 / EXPORT_FPS)) });
-      encoder.encode(frame);
-      frame.close();
-
-      if (encoderError) throw encoderError;
-
-      while (encoder.encodeQueueSize > 4) {
-        await new Promise(function(r) { setTimeout(r, 10); });
-      }
-      if (encoderError) throw encoderError;
+      compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type);
+      await checkBackpressure();
 
       if (f % 5 === 0 || f === totalFrames - 1) {
         setExportStatus('Rendering… ' + Math.round(((f + 1) / totalFrames) * 100) + '%');
+      }
+    }
+
+    // Optional outro: pull the camera back from wherever it ended up, to
+    // reveal more surrounding context once the route is fully drawn.
+    if (zoomOutAmount > 0) {
+      setExportStatus('Zooming out…');
+      var outroFrames = Math.max(1, Math.round(2 * EXPORT_FPS));
+      var startZoom = em.leafletMap.getZoom();
+      var minZoom = em.leafletMap.getMinZoom ? em.leafletMap.getMinZoom() : 1;
+      var endZoom = Math.max(minZoom, startZoom - zoomOutAmount);
+      var centerPt = headPt;
+
+      for (var z = 0; z < outroFrames; z++) {
+        var zp = (z + 1) / outroFrames;
+        var eased = 1 - Math.pow(1 - zp, 3); // ease-out cubic
+        var zoomNow = startZoom - (startZoom - endZoom) * eased;
+        em.leafletMap.setView(centerPt, zoomNow, { animate: false });
+        await waitForMapIdle(mlMap, 1500);
+
+        compositeAndEncode(totalFrames + z, visible, null, headPt, activeRoute.type);
+        await checkBackpressure();
       }
     }
 

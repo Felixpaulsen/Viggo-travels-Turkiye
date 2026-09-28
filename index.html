@@ -117,18 +117,6 @@
     .record-btn.exporting { color: #f85149; cursor: default; }
     .record-btn.exporting:hover { transform: none; }
 
-    .follow-toggle {
-      position: absolute; bottom: 46px; right: 128px;
-      width: 48px; height: 48px; border-radius: 50%;
-      background: var(--panel); border: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: center;
-      cursor: pointer; z-index: 1000; color: var(--muted); font-size: 18px;
-      box-shadow: 0 2px 10px rgba(0,0,0,.5);
-      transition: background .15s, color .15s, border-color .15s;
-    }
-    .follow-toggle:hover { background: #21262d; }
-    .follow-toggle.active { color: var(--accent); border-color: var(--accent); }
-
     .legend { display: flex; gap: 16px; margin-bottom: 16px; }
     .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
     .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
@@ -203,8 +191,8 @@
         <span class="day-filter-sep">sec</span>
       </div>
       <div class="export-row" style="margin-top:10px;">
-        <label for="export-zoomout">Zoom out at end</label>
-        <input type="number" id="export-zoomout" min="0" max="10" step="0.5" value="0" />
+        <label for="export-startzoom">Start zoom-in</label>
+        <input type="number" id="export-startzoom" min="0" max="15" step="0.5" value="7" />
         <span class="day-filter-sep">levels</span>
       </div>
       <div class="export-status" id="export-status"></div>
@@ -220,7 +208,6 @@
   </aside>
   <div class="map-wrap">
     <div id="map"></div>
-    <div class="follow-toggle" id="follow-toggle" title="Follow the traveler while animating">&#127919;</div>
     <div class="record-btn" id="record-btn" title="Record animation as a video">&#128249;</div>
     <div class="play-btn" id="play-btn" title="Play route animation">&#9654;</div>
   </div>
@@ -672,12 +659,6 @@ function revalidateInBackground(entries, ridesByFile) {
 // the normal static view.
 var animating = false;
 var animLayers = [];
-var followEnabled = false;
-
-document.getElementById('follow-toggle').addEventListener('click', function() {
-  followEnabled = !followEnabled;
-  this.classList.toggle('active', followEnabled);
-});
 
 function stopAnimation() {
   if (!animating) return;
@@ -738,7 +719,6 @@ function playAnimation() {
       animLine.setLatLngs(slice);
       var head = slice[slice.length - 1];
       traveler.setLatLng(head);
-      if (followEnabled) map.setView(head, map.getZoom(), { animate: false });
       if (progress < 1) {
         requestAnimationFrame(frame);
       } else {
@@ -797,6 +777,10 @@ function createExportMap() {
     zoomSnap: 0, zoomDelta: 0.25, // continuous zoom — no snapping to whole levels
     center: map.getCenter(), zoom: map.getZoom()
   });
+  // The container is off-screen, so Leaflet can cache a stale/incorrect
+  // internal size at construction time — force it to recheck against the
+  // container's actual layout before we rely on its coordinate math.
+  exportMap.invalidateSize(false);
   var glLayer = L.maplibreGL({ style: CARTO_STYLE_URL }).addTo(exportMap);
 
   return { leafletMap: exportMap, glLayer: glLayer, container: container };
@@ -842,6 +826,22 @@ function waitForMapLoad(maplibreMap, timeoutMs) {
     function finish() { if (!done) { done = true; resolve(); } }
     maplibreMap.once('load', finish);
     setTimeout(finish, timeoutMs || 6000);
+  });
+}
+
+// Waits for one actual repaint after a camera move (MapLibre's 'render'
+// event), rather than the much slower 'idle' (which waits for every tile to
+// finish loading). This matters for correctness, not just speed: .project()
+// reflects a new setView() immediately, but the canvas pixels only catch up
+// once a repaint has actually happened — grabbing the canvas before that
+// happens would draw route points for the new camera on top of the old,
+// stale basemap image, showing up as drift while panning.
+function waitForMapRender(maplibreMap, timeoutMs) {
+  return new Promise(function(resolve) {
+    var done = false;
+    function finish() { if (!done) { done = true; resolve(); } }
+    maplibreMap.once('render', finish);
+    setTimeout(finish, timeoutMs || 300);
   });
 }
 
@@ -947,15 +947,15 @@ async function exportVideo() {
   var durationInput = document.getElementById('export-duration');
   var duration = Math.max(1, parseFloat(durationInput.value) || 12);
   var totalFrames = Math.max(1, Math.round(duration * EXPORT_FPS));
-  var zoomOutAmount = Math.max(0, parseFloat(document.getElementById('export-zoomout').value) || 0);
+  var startZoomOffset = Math.max(0, parseFloat(document.getElementById('export-startzoom').value) || 0);
 
   setExportStatus('Preparing…');
 
   // Allocate time per route proportional to its distance, so longer legs
-  // get proportionally more of the fixed total duration.
+  // get proportionally more of the route-drawing portion of the video.
   var weights = visible.map(function(r) { return Math.max(r.distKm, 0.05); });
   var totalWeight = weights.reduce(function(s, w) { return s + w; }, 0);
-  var routeStart = []; // fraction of total duration where each route begins
+  var routeStart = []; // fraction (0..1) of the *route-drawing* timeline where each route begins
   var acc = 0;
   weights.forEach(function(w) { routeStart.push(acc / totalWeight); acc += w; });
   routeStart.push(1);
@@ -967,7 +967,20 @@ async function exportVideo() {
   var em = createExportMap();
   var mlMap = em.glLayer.getMaplibreMap();
   await waitForMapLoad(mlMap);
+  em.leafletMap.invalidateSize(false);
+
+  // End camera: the whole route fit to 80% of the frame — read off its
+  // center/zoom without staying there.
   fitBoundsToFraction(em.leafletMap, bounds, EXPORT_WIDTH, EXPORT_HEIGHT, 0.8);
+  var endCenter = em.leafletMap.getCenter();
+  var endZoom = em.leafletMap.getZoom();
+
+  // Start camera: tightly zoomed in on the route's very first point.
+  var startZoom = Math.min(endZoom + startZoomOffset, 19);
+  var firstPt = visible[0].latLngs[0];
+  var startCenter = L.latLng(firstPt[0], firstPt[1]);
+
+  em.leafletMap.setView(startCenter, startZoom, { animate: false });
   await waitForMapIdle(mlMap, 8000);
 
   var canvas = document.createElement('canvas');
@@ -1011,21 +1024,35 @@ async function exportVideo() {
 
   // Draws one frame (basemap + given route lines + traveler marker) and
   // hands it to the encoder. `partial` is optional: { route, count }.
+  // Points are projected via MapLibre's own .project() (not Leaflet's
+  // latLngToContainerPoint) because the maplibre-gl-leaflet bridge
+  // repositions the GL canvas with its own CSS transform to track Leaflet's
+  // panning — so Leaflet's idea of a point's screen position can briefly
+  // disagree with where MapLibre actually rendered it in its own canvas
+  // (which is exactly the pixels we're compositing from). Asking MapLibre
+  // directly keeps the two perfectly in sync.
   function compositeAndEncode(frameIndex, fullRoutes, partial, headLatLng, headType) {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
     ctx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
 
+    function project(latlng) {
+      // latlng is [lat, lon]; MapLibre wants [lng, lat].
+      return mlMap.project([latlng[1], latlng[0]]);
+    }
+
     function strokeLine(pts, color) {
       if (pts.length < 2) return;
+      var screenPts = pts.map(project);
+      var valid = screenPts.every(function(sp) { return isFinite(sp.x) && isFinite(sp.y); });
+      if (!valid) return; // camera state wasn't ready when this was computed — skip rather than draw garbage
       ctx.strokeStyle = color;
       ctx.lineWidth = 5;
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
       ctx.beginPath();
-      for (var p = 0; p < pts.length; p++) {
-        var sp = em.leafletMap.latLngToContainerPoint(pts[p]);
-        if (p === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
+      for (var p = 0; p < screenPts.length; p++) {
+        if (p === 0) ctx.moveTo(screenPts[p].x, screenPts[p].y); else ctx.lineTo(screenPts[p].x, screenPts[p].y);
       }
       ctx.stroke();
     }
@@ -1034,7 +1061,7 @@ async function exportVideo() {
     if (partial) strokeLine(partial.route.latLngs.slice(0, partial.count), partial.route.color);
 
     if (headLatLng) {
-      var headScreen = em.leafletMap.latLngToContainerPoint(headLatLng);
+      var headScreen = project(headLatLng);
       ctx.font = '44px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -1054,58 +1081,51 @@ async function exportVideo() {
     if (encoderError) throw encoderError;
   }
 
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // The camera moves through a large zoom range over the whole video. Trying
+  // to fully settle (load tiles for) a brand-new camera state on every one
+  // of e.g. 90 frames overwhelms MapLibre — it can't keep up, which shows up
+  // as missing tiles and even briefly-invalid projected coordinates (routes
+  // vanishing). So the camera only actually moves every few frames, each
+  // time waiting properly for it to settle; route drawing still advances
+  // every single frame since it's pure math against whatever camera state
+  // is currently settled, not tied to tile loading at all.
+  var CAMERA_UPDATE_EVERY = 3;
+
   try {
     var headPt, activeRoute;
     for (var f = 0; f < totalFrames; f++) {
-      var progress = totalFrames === 1 ? 1 : f / (totalFrames - 1);
-      var activeIdx = findActiveIndex(progress);
+      var t = totalFrames === 1 ? 1 : f / (totalFrames - 1);
+
+      // Camera: continuous, linear zoom-out across the *entire* duration,
+      // from the tight start view to the full-route overview — so "3/4 of
+      // the way through" lines up with 3/4 of the way through this.
+      if (f % CAMERA_UPDATE_EVERY === 0 || f === totalFrames - 1) {
+        var camLat = lerp(startCenter.lat, endCenter.lat, t);
+        var camLng = lerp(startCenter.lng, endCenter.lng, t);
+        var camZoom = lerp(startZoom, endZoom, t);
+        em.leafletMap.setView([camLat, camLng], camZoom, { animate: false });
+        await waitForMapIdle(mlMap, 1000);
+      }
+
+      // Route drawing: finishes at 3/4 of the duration, then stays fully
+      // drawn while the camera spends the final quarter pulling back to
+      // reveal the whole map.
+      var routeT = Math.min(1, t / 0.75);
+      var activeIdx = findActiveIndex(routeT);
       activeRoute = visible[activeIdx];
       var localSpan = routeStart[activeIdx + 1] - routeStart[activeIdx];
-      var localProgress = localSpan > 0 ? Math.min(1, Math.max(0, (progress - routeStart[activeIdx]) / localSpan)) : 1;
+      var localProgress = localSpan > 0 ? Math.min(1, Math.max(0, (routeT - routeStart[activeIdx]) / localSpan)) : 1;
       var pts = activeRoute.latLngs;
       var count = Math.max(2, Math.round(pts.length * localProgress));
       headPt = pts[count - 1];
-
-      if (followEnabled) {
-        em.leafletMap.setView(headPt, em.leafletMap.getZoom(), { animate: false });
-        await waitForMapIdle(mlMap, 150);
-      }
 
       compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type);
       await checkBackpressure();
 
       if (f % 5 === 0 || f === totalFrames - 1) {
         setExportStatus('Rendering… ' + Math.round(((f + 1) / totalFrames) * 100) + '%');
-      }
-    }
-
-    // Optional outro: pull the camera back from wherever it ended up, to
-    // reveal more surrounding context once the route is fully drawn.
-    if (zoomOutAmount > 0) {
-      setExportStatus('Zooming out…');
-      var outroFrames = Math.max(1, Math.round(2 * EXPORT_FPS));
-      var startZoom = em.leafletMap.getZoom();
-      var minZoom = em.leafletMap.getMinZoom ? em.leafletMap.getMinZoom() : 1;
-      var endZoom = Math.max(minZoom, startZoom - zoomOutAmount);
-      var centerPt = headPt;
-
-      for (var z = 0; z < outroFrames; z++) {
-        var zp = (z + 1) / outroFrames;
-        var eased = 1 - Math.pow(1 - zp, 3); // ease-out cubic
-        var zoomNow = startZoom - (startZoom - endZoom) * eased;
-        em.leafletMap.setView(centerPt, zoomNow, { animate: false });
-        await waitForMapIdle(mlMap, 150);
-
-        compositeAndEncode(totalFrames + z, visible, null, headPt, activeRoute.type);
-        await checkBackpressure();
-      }
-
-      // Hold on the final zoomed-out view for 2 seconds before finishing.
-      setExportStatus('Holding…');
-      var holdFrames = Math.max(1, Math.round(2 * EXPORT_FPS));
-      for (var h = 0; h < holdFrames; h++) {
-        compositeAndEncode(totalFrames + outroFrames + h, visible, null, headPt, activeRoute.type);
-        await checkBackpressure();
       }
     }
 

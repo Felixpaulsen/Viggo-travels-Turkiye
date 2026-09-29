@@ -1008,14 +1008,34 @@ async function exportVideo() {
   var firstPt = visible[0].latLngs[0]; // [lat, lon]
   var startCenter = [firstPt[0], firstPt[1]];
 
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function cameraAtFrame(f) {
+    var t = totalFrames === 1 ? 1 : f / (totalFrames - 1);
+    return {
+      lat: lerp(startCenter[0], endCenter[0], t),
+      lng: lerp(startCenter[1], endCenter[1], t),
+      zoom: lerp(startZoom, endZoom, t)
+    };
+  }
+
+  // How often MapLibre actually re-renders into the cached snapshot. Every
+  // frame's *visual* camera is still computed exactly (see the loop below);
+  // this only controls how often we ask MapLibre to load a fresh tile set.
+  var CAMERA_REFRESH_EVERY = 3;
+
   // The camera sweeps a large zoom range over the whole video. Asking
   // MapLibre to fully reload tiles for a brand-new view on every one of
   // e.g. 90 frames overwhelms it — tiles come in patchy and the camera
   // state can be briefly inconsistent (routes vanishing, choppy motion).
   // So MapLibre only actually re-renders periodically into a cached
   // snapshot; every frame's *visual* camera is instead produced by
-  // scaling/translating that snapshot with exact math (see compositeAndEncode),
-  // which is what makes the zoom look genuinely continuous every frame.
+  // scaling/translating that snapshot with exact math (see compositeAndEncode).
+  //
+  // Since this video only ever zooms OUT, each snapshot is always rendered
+  // at the *widest* (most zoomed-out) point of its upcoming interval, not
+  // the current frame — that way every frame in between only ever needs to
+  // crop/enlarge from it, never needing area outside what was captured
+  // (which is what shows up as black bars around the edges).
   var snapshot = document.createElement('canvas');
   snapshot.width = EXPORT_WIDTH;
   snapshot.height = EXPORT_HEIGHT;
@@ -1030,7 +1050,8 @@ async function exportVideo() {
     renderedCamera = { lat: lat, lng: lng, zoom: zoom };
   }
 
-  await refreshSnapshot(startCenter[0], startCenter[1], startZoom, 8000);
+  var initialLookahead = cameraAtFrame(Math.min(CAMERA_REFRESH_EVERY - 1, totalFrames - 1));
+  await refreshSnapshot(initialLookahead.lat, initialLookahead.lng, initialLookahead.zoom, 8000);
 
   var canvas = document.createElement('canvas');
   canvas.width = EXPORT_WIDTH;
@@ -1135,29 +1156,19 @@ async function exportVideo() {
     if (encoderError) throw encoderError;
   }
 
-  function lerp(a, b, t) { return a + (b - a) * t; }
-
-  // How often MapLibre actually re-renders into the cached snapshot. Every
-  // frame's *visual* camera is still computed exactly (see the loop below);
-  // this only controls how often we ask MapLibre to load a fresh tile set.
-  var CAMERA_REFRESH_EVERY = 3;
-
   try {
     var headPt, activeRoute;
     for (var f = 0; f < totalFrames; f++) {
       var t = totalFrames === 1 ? 1 : f / (totalFrames - 1);
+      var cam = cameraAtFrame(f);
 
-      // Camera: continuous, linear zoom-out across the *entire* duration,
-      // from the tight start view to the full-route overview — so "3/4 of
-      // the way through" lines up with 3/4 of the way through this. Computed
-      // exactly every frame (cheap — it's just math), independent of how
-      // often MapLibre itself actually re-renders.
-      var camLat = lerp(startCenter[0], endCenter[0], t);
-      var camLng = lerp(startCenter[1], endCenter[1], t);
-      var camZoom = lerp(startZoom, endZoom, t);
-
-      if (f > 0 && (f % CAMERA_REFRESH_EVERY === 0 || f === totalFrames - 1)) {
-        await refreshSnapshot(camLat, camLng, camZoom, 1000);
+      // Refresh the cached snapshot periodically, always rendering ahead to
+      // the widest point of the *next* interval (see comment above) rather
+      // than the current frame's camera.
+      if (f > 0 && f % CAMERA_REFRESH_EVERY === 0) {
+        var lookaheadFrame = Math.min(f + CAMERA_REFRESH_EVERY - 1, totalFrames - 1);
+        var lookaheadCam = cameraAtFrame(lookaheadFrame);
+        await refreshSnapshot(lookaheadCam.lat, lookaheadCam.lng, lookaheadCam.zoom, 1000);
       }
 
       // Route drawing: finishes at 3/4 of the duration, then stays fully
@@ -1172,8 +1183,7 @@ async function exportVideo() {
       var count = Math.max(2, Math.round(pts.length * localProgress));
       headPt = pts[count - 1];
 
-      compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type,
-        { lat: camLat, lng: camLng, zoom: camZoom });
+      compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type, cam);
       await checkBackpressure();
 
       if (f % 5 === 0 || f === totalFrames - 1) {

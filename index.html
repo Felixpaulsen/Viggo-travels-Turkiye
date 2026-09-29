@@ -328,23 +328,29 @@ function parseGPX(xmlStr) {
 }
 
 // ── Day filtering ──────────────────────────────────────────────────────────
-// Day numbers come from grouping each route's own timestamp by calendar
-// date, not from filenames — 1 is the earliest date seen, 2 the next, etc.
-// Routes with no usable timestamp are always shown, since they can't be
-// placed into a day.
+// Day numbers reflect actual calendar days elapsed since the trip's earliest
+// date (1 = that first date, 2 = the day after, etc.) — NOT just the index
+// of distinct dates seen. That distinction matters when a day has no routes
+// (a rest day, a gap in recording): day 4 should still show as "4", not get
+// silently renumbered to "3" because day 3 happened to be empty.
 function assignDayNumbers() {
-  var dateStrs = [];
+  var dated = rides.filter(function(r) { return r.date && !isNaN(r.date); });
+  if (!dated.length) {
+    rides.forEach(function(r) { r.dayNumber = null; });
+    return;
+  }
+  var dateStrs = dated.map(function(r) { return r.date.toISOString().slice(0, 10); });
+  var minDateStr = dateStrs.reduce(function(a, b) { return a < b ? a : b; });
+  var minDate = new Date(minDateStr + 'T00:00:00Z');
+
   rides.forEach(function(r) {
     if (r.date && !isNaN(r.date)) {
-      var d = r.date.toISOString().slice(0, 10);
-      if (dateStrs.indexOf(d) === -1) dateStrs.push(d);
+      var dStr = r.date.toISOString().slice(0, 10);
+      var d = new Date(dStr + 'T00:00:00Z');
+      r.dayNumber = Math.round((d - minDate) / 86400000) + 1;
+    } else {
+      r.dayNumber = null;
     }
-  });
-  dateStrs.sort();
-  var dayMap = {};
-  dateStrs.forEach(function(d, i) { dayMap[d] = i + 1; });
-  rides.forEach(function(r) {
-    r.dayNumber = (r.date && !isNaN(r.date)) ? dayMap[r.date.toISOString().slice(0, 10)] : null;
   });
 }
 
@@ -364,32 +370,43 @@ function applyVisibilityStyles() {
   });
 }
 
-function computeMaxDay() {
-  var max = 0;
-  rides.forEach(function(r) { if (r.dayNumber) max = Math.max(max, r.dayNumber); });
-  return max;
+// The distinct day numbers that actually have routes, ascending — used to
+// populate the dropdowns so a gap day never appears as a selectable option.
+function getDayNumbersPresent() {
+  var seen = {};
+  var days = [];
+  rides.forEach(function(r) {
+    if (r.dayNumber && !seen[r.dayNumber]) { seen[r.dayNumber] = true; days.push(r.dayNumber); }
+  });
+  days.sort(function(a, b) { return a - b; });
+  return days;
 }
 
 function populateDayFilterOptions() {
-  var maxDay = computeMaxDay();
+  var days = getDayNumbersPresent();
   var wrap = document.getElementById('day-filter');
 
-  if (maxDay < 2) { wrap.style.display = 'none'; dayFilter = null; return; }
+  if (days.length < 2) { wrap.style.display = 'none'; dayFilter = null; return; }
 
   var fromSel = document.getElementById('day-from');
   var toSel   = document.getElementById('day-to');
-  var opts = '';
-  for (var d = 1; d <= maxDay; d++) opts += '<option value="' + d + '">Day ' + d + '</option>';
+  var opts = days.map(function(d) { return '<option value="' + d + '">Day ' + d + '</option>'; }).join('');
   if (fromSel.innerHTML !== opts) fromSel.innerHTML = opts;
   if (toSel.innerHTML !== opts) toSel.innerHTML = opts;
 
+  var lo = days[0], hi = days[days.length - 1];
+
   if (!dayFilterInitialized) {
     dayFilterInitialized = true;
-    dayFilter = { min: 1, max: maxDay };
+    dayFilter = { min: lo, max: hi };
   } else {
-    // Keep the user's current selection, clamped to the (possibly changed) range.
-    var min = Math.min(Math.max(dayFilter ? dayFilter.min : 1, 1), maxDay);
-    var max = Math.max(min, Math.min(dayFilter ? dayFilter.max : maxDay, maxDay));
+    // Keep the user's current selection, snapped to the nearest still-available days.
+    function nearest(target) {
+      return days.reduce(function(best, d) { return Math.abs(d - target) < Math.abs(best - target) ? d : best; }, days[0]);
+    }
+    var min = nearest(dayFilter ? dayFilter.min : lo);
+    var max = nearest(dayFilter ? dayFilter.max : hi);
+    if (min > max) { var tmp = min; min = max; max = tmp; }
     dayFilter = { min: min, max: max };
   }
 
@@ -421,10 +438,11 @@ document.getElementById('day-from').addEventListener('change', onDayFilterChange
 document.getElementById('day-to').addEventListener('change', onDayFilterChange);
 document.getElementById('day-reset').addEventListener('click', function() {
   if (animating) stopAnimation();
-  var maxDay = computeMaxDay();
-  dayFilter = { min: 1, max: maxDay };
-  document.getElementById('day-from').value = 1;
-  document.getElementById('day-to').value = maxDay;
+  var days = getDayNumbersPresent();
+  if (!days.length) return;
+  dayFilter = { min: days[0], max: days[days.length - 1] };
+  document.getElementById('day-from').value = dayFilter.min;
+  document.getElementById('day-to').value = dayFilter.max;
   refreshFilteredView();
 });
 
@@ -762,6 +780,34 @@ function updateExportBtn(active) {
   btn.title = active ? 'Rendering video…' : 'Export animation as a video';
 }
 
+// MapLibre GL's native zoom scale is offset by exactly 1 level from the
+// "traditional" 256px-tile zoom convention used everywhere else in this
+// file (Leaflet, and our own TURKEY_ZOOM/startZoom/endZoom numbers) — this
+// is a well-known MapLibre/Mapbox GL quirk from its use of 512px tiles
+// internally. Forgetting this correction is what made the exported video's
+// final zoom look one level too tight compared to the live map.
+var MAPLIBRE_ZOOM_OFFSET = -1;
+function toMaplibreZoom(z) { return z + MAPLIBRE_ZOOM_OFFSET; }
+
+// Self-contained Web Mercator projection (256px-tile convention, matching
+// our own zoom numbers) — deliberately independent of MapLibre's actual,
+// throttled camera state, so we can compute an exact pixel position for
+// *any* desired camera on *every* frame, not just the ones where MapLibre
+// has actually finished loading tiles for a fresh view.
+var MERC_TILE_SIZE = 256;
+function mercatorPoint(lat, lng, zoom) {
+  var scale = MERC_TILE_SIZE * Math.pow(2, zoom);
+  var x = (lng + 180) / 360 * scale;
+  var sinLat = Math.sin(lat * Math.PI / 180);
+  var y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { x: x, y: y };
+}
+function projectAt(lat, lng, zoom, centerLat, centerLng, width, height) {
+  var p = mercatorPoint(lat, lng, zoom);
+  var c = mercatorPoint(centerLat, centerLng, zoom);
+  return { x: width / 2 + (p.x - c.x), y: height / 2 + (p.y - c.y) };
+}
+
 // Builds a hidden map (same basemap style, no controls) at the export
 // resolution, used purely as a coordinate/render source — never shown.
 // Uses MapLibre GL JS directly (no Leaflet layer in between) so there is
@@ -781,7 +827,7 @@ function createExportMap() {
     container: container,
     style: CARTO_STYLE_URL,
     center: [TURKEY_CENTER[1], TURKEY_CENTER[0]], // maplibre wants [lng, lat]
-    zoom: TURKEY_ZOOM,
+    zoom: toMaplibreZoom(TURKEY_ZOOM),
     interactive: false,
     attributionControl: false,
     fadeDuration: 0
@@ -962,8 +1008,29 @@ async function exportVideo() {
   var firstPt = visible[0].latLngs[0]; // [lat, lon]
   var startCenter = [firstPt[0], firstPt[1]];
 
-  mlMap.jumpTo({ center: [startCenter[1], startCenter[0]], zoom: startZoom });
-  await waitForMapIdle(mlMap, 8000);
+  // The camera sweeps a large zoom range over the whole video. Asking
+  // MapLibre to fully reload tiles for a brand-new view on every one of
+  // e.g. 90 frames overwhelms it — tiles come in patchy and the camera
+  // state can be briefly inconsistent (routes vanishing, choppy motion).
+  // So MapLibre only actually re-renders periodically into a cached
+  // snapshot; every frame's *visual* camera is instead produced by
+  // scaling/translating that snapshot with exact math (see compositeAndEncode),
+  // which is what makes the zoom look genuinely continuous every frame.
+  var snapshot = document.createElement('canvas');
+  snapshot.width = EXPORT_WIDTH;
+  snapshot.height = EXPORT_HEIGHT;
+  var snapshotCtx = snapshot.getContext('2d');
+  var renderedCamera = null; // { lat, lng, zoom } matching what's currently in `snapshot`
+
+  async function refreshSnapshot(lat, lng, zoom, timeoutMs) {
+    mlMap.jumpTo({ center: [lng, lat], zoom: toMaplibreZoom(zoom) });
+    await waitForMapIdle(mlMap, timeoutMs);
+    snapshotCtx.clearRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+    snapshotCtx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+    renderedCamera = { lat: lat, lng: lng, zoom: zoom };
+  }
+
+  await refreshSnapshot(startCenter[0], startCenter[1], startZoom, 8000);
 
   var canvas = document.createElement('canvas');
   canvas.width = EXPORT_WIDTH;
@@ -1006,28 +1073,33 @@ async function exportVideo() {
 
   // Draws one frame (basemap + given route lines + traveler marker) and
   // hands it to the encoder. `partial` is optional: { route, count }.
-  // Points are projected via MapLibre's own .project() (not Leaflet's
-  // latLngToContainerPoint) because the maplibre-gl-leaflet bridge
-  // repositions the GL canvas with its own CSS transform to track Leaflet's
-  // panning — so Leaflet's idea of a point's screen position can briefly
-  // disagree with where MapLibre actually rendered it in its own canvas
-  // (which is exactly the pixels we're compositing from). Asking MapLibre
-  // directly keeps the two perfectly in sync.
-  function compositeAndEncode(frameIndex, fullRoutes, partial, headLatLng, headType) {
+  // `desiredCam` is this exact frame's { lat, lng, zoom } — the cached
+  // basemap snapshot (rendered at `renderedCamera`, updated periodically)
+  // is scaled/translated with exact Mercator math to simulate this precise
+  // camera, and route points are projected with that same math, so the two
+  // can never disagree even though MapLibre itself only re-renders every
+  // few frames.
+  function compositeAndEncode(frameIndex, fullRoutes, partial, headLatLng, headType, desiredCam) {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
-    ctx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+
+    var scale = Math.pow(2, desiredCam.zoom - renderedCamera.zoom);
+    var oldCenterOnNewCam = projectAt(
+      renderedCamera.lat, renderedCamera.lng, desiredCam.zoom,
+      desiredCam.lat, desiredCam.lng, EXPORT_WIDTH, EXPORT_HEIGHT
+    );
+    var offsetX = oldCenterOnNewCam.x - scale * (EXPORT_WIDTH / 2);
+    var offsetY = oldCenterOnNewCam.y - scale * (EXPORT_HEIGHT / 2);
+    ctx.drawImage(snapshot, offsetX, offsetY, EXPORT_WIDTH * scale, EXPORT_HEIGHT * scale);
 
     function project(latlng) {
-      // latlng is [lat, lon]; MapLibre wants [lng, lat].
-      return mlMap.project([latlng[1], latlng[0]]);
+      // latlng is [lat, lon].
+      return projectAt(latlng[0], latlng[1], desiredCam.zoom, desiredCam.lat, desiredCam.lng, EXPORT_WIDTH, EXPORT_HEIGHT);
     }
 
     function strokeLine(pts, color) {
       if (pts.length < 2) return;
       var screenPts = pts.map(project);
-      var valid = screenPts.every(function(sp) { return isFinite(sp.x) && isFinite(sp.y); });
-      if (!valid) return; // camera state wasn't ready when this was computed — skip rather than draw garbage
       ctx.strokeStyle = color;
       ctx.lineWidth = 5;
       ctx.lineJoin = 'round';
@@ -1065,15 +1137,10 @@ async function exportVideo() {
 
   function lerp(a, b, t) { return a + (b - a) * t; }
 
-  // The camera moves through a large zoom range over the whole video. Trying
-  // to fully settle (load tiles for) a brand-new camera state on every one
-  // of e.g. 90 frames overwhelms MapLibre — it can't keep up, which shows up
-  // as missing tiles and even briefly-invalid projected coordinates (routes
-  // vanishing). So the camera only actually moves every few frames, each
-  // time waiting properly for it to settle; route drawing still advances
-  // every single frame since it's pure math against whatever camera state
-  // is currently settled, not tied to tile loading at all.
-  var CAMERA_UPDATE_EVERY = 3;
+  // How often MapLibre actually re-renders into the cached snapshot. Every
+  // frame's *visual* camera is still computed exactly (see the loop below);
+  // this only controls how often we ask MapLibre to load a fresh tile set.
+  var CAMERA_REFRESH_EVERY = 3;
 
   try {
     var headPt, activeRoute;
@@ -1082,13 +1149,15 @@ async function exportVideo() {
 
       // Camera: continuous, linear zoom-out across the *entire* duration,
       // from the tight start view to the full-route overview — so "3/4 of
-      // the way through" lines up with 3/4 of the way through this.
-      if (f % CAMERA_UPDATE_EVERY === 0 || f === totalFrames - 1) {
-        var camLat = lerp(startCenter[0], endCenter[0], t);
-        var camLng = lerp(startCenter[1], endCenter[1], t);
-        var camZoom = lerp(startZoom, endZoom, t);
-        mlMap.jumpTo({ center: [camLng, camLat], zoom: camZoom });
-        await waitForMapIdle(mlMap, 1000);
+      // the way through" lines up with 3/4 of the way through this. Computed
+      // exactly every frame (cheap — it's just math), independent of how
+      // often MapLibre itself actually re-renders.
+      var camLat = lerp(startCenter[0], endCenter[0], t);
+      var camLng = lerp(startCenter[1], endCenter[1], t);
+      var camZoom = lerp(startZoom, endZoom, t);
+
+      if (f > 0 && (f % CAMERA_REFRESH_EVERY === 0 || f === totalFrames - 1)) {
+        await refreshSnapshot(camLat, camLng, camZoom, 1000);
       }
 
       // Route drawing: finishes at 3/4 of the duration, then stays fully
@@ -1103,7 +1172,8 @@ async function exportVideo() {
       var count = Math.max(2, Math.round(pts.length * localProgress));
       headPt = pts[count - 1];
 
-      compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type);
+      compositeAndEncode(f, visible.slice(0, activeIdx), { route: activeRoute, count: count }, headPt, activeRoute.type,
+        { lat: camLat, lng: camLng, zoom: camZoom });
       await checkBackpressure();
 
       if (f % 5 === 0 || f === totalFrames - 1) {

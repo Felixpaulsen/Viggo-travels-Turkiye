@@ -1064,15 +1064,34 @@ async function exportVideo() {
     });
   }
 
+  // 'idle' means MapLibre's internal work queue is empty, but that's not
+  // quite the same guarantee as "every tile needed for this exact view has
+  // actually finished loading" — areTilesLoaded() is the more direct check
+  // for that. Polling it explicitly (rather than trusting idle alone) is
+  // what actually catches the case where one edge of the frame is still
+  // mid-load when we grab the canvas — which edge varies run to run,
+  // confirming it's a loading race rather than a fixed sizing bug.
+  function waitForTilesLoaded(maplibreMap, maxWaitMs) {
+    return new Promise(function(resolve) {
+      var start = Date.now();
+      function check() {
+        var loaded = false;
+        try { loaded = maplibreMap.areTilesLoaded(); } catch (e) { loaded = true; }
+        if (loaded || Date.now() - start > maxWaitMs) resolve();
+        else setTimeout(check, 50);
+      }
+      check();
+    });
+  }
+
   async function refreshSnapshot(lat, lng, zoom, timeoutMs) {
     mlMap.resize(); // re-confirm against the container every time, not just once
     mlMap.jumpTo({ center: [lng, lat], zoom: toMaplibreZoom(zoom) });
     await waitForMapIdle(mlMap, timeoutMs);
-    // MapLibre's 'idle' event means loading/queued work is done, but the
-    // browser may not have actually painted that final state to the canvas
-    // buffer yet — wait a couple of real frames to be sure before grabbing
-    // pixels, otherwise part of the canvas can still show whatever was
-    // there before (which is what a gap at the edge of the frame looks like).
+    await waitForTilesLoaded(mlMap, timeoutMs);
+    // Even once tiles are loaded, the browser may not have actually painted
+    // that final state to the canvas buffer yet — wait a couple of real
+    // frames to be sure before grabbing pixels.
     await nextPaint();
     var srcW = mlMap.getCanvas().width, srcH = mlMap.getCanvas().height;
     snapshotCtx.clearRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);

@@ -1058,11 +1058,27 @@ async function exportVideo() {
   var snapshotCtx = snapshot.getContext('2d');
   var renderedCamera = null; // { lat, lng, zoom } matching what's currently in `snapshot`
 
+  function nextPaint() {
+    return new Promise(function(resolve) {
+      requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+    });
+  }
+
   async function refreshSnapshot(lat, lng, zoom, timeoutMs) {
+    mlMap.resize(); // re-confirm against the container every time, not just once
     mlMap.jumpTo({ center: [lng, lat], zoom: toMaplibreZoom(zoom) });
     await waitForMapIdle(mlMap, timeoutMs);
+    // MapLibre's 'idle' event means loading/queued work is done, but the
+    // browser may not have actually painted that final state to the canvas
+    // buffer yet — wait a couple of real frames to be sure before grabbing
+    // pixels, otherwise part of the canvas can still show whatever was
+    // there before (which is what a gap at the edge of the frame looks like).
+    await nextPaint();
+    var srcW = mlMap.getCanvas().width, srcH = mlMap.getCanvas().height;
     snapshotCtx.clearRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
-    snapshotCtx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+    if (srcW > 0 && srcH > 0) {
+      snapshotCtx.drawImage(mlMap.getCanvas(), 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+    }
     renderedCamera = { lat: lat, lng: lng, zoom: zoom };
   }
 

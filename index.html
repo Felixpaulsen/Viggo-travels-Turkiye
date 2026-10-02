@@ -195,6 +195,10 @@
         <input type="number" id="export-startzoom" min="0" max="15" step="0.5" value="7" />
         <span class="day-filter-sep">levels</span>
       </div>
+      <div class="export-row" style="margin-top:10px;">
+        <label for="export-ease" title="1 = constant speed. Higher = the zoom-out slows down more noticeably toward the end.">Zoom ease</label>
+        <input type="number" id="export-ease" min="1" max="5" step="0.25" value="2.5" />
+      </div>
       <div class="export-status" id="export-status"></div>
     </div>
     <div class="routes">
@@ -998,6 +1002,12 @@ async function exportVideo() {
   var em = createExportMap();
   var mlMap = em.mlMap;
   await waitForMapLoad(mlMap);
+  // The container is off-screen and newly created, so MapLibre's own
+  // resize-observer-driven sizing can lag behind — force it to match the
+  // container's real dimensions now rather than risk capturing a frame
+  // before it catches up (which showed up as a black bar at the bottom of
+  // the first few frames).
+  mlMap.resize();
 
   // End camera: the same fixed "whole of Turkey" view the site loads with.
   var endCenter = TURKEY_CENTER;
@@ -1008,13 +1018,19 @@ async function exportVideo() {
   var firstPt = visible[0].latLngs[0]; // [lat, lon]
   var startCenter = [firstPt[0], firstPt[1]];
 
+  // 1 = constant speed; higher values decelerate more noticeably toward the
+  // end (ease-out). This only affects how the camera moves, not when the
+  // route finishes drawing — that's still pinned to 3/4 of real time below.
+  var zoomEasePower = Math.max(1, parseFloat(document.getElementById('export-ease').value) || 1);
+
   function lerp(a, b, t) { return a + (b - a) * t; }
   function cameraAtFrame(f) {
     var t = totalFrames === 1 ? 1 : f / (totalFrames - 1);
+    var eased = 1 - Math.pow(1 - t, zoomEasePower);
     return {
-      lat: lerp(startCenter[0], endCenter[0], t),
-      lng: lerp(startCenter[1], endCenter[1], t),
-      zoom: lerp(startZoom, endZoom, t)
+      lat: lerp(startCenter[0], endCenter[0], eased),
+      lng: lerp(startCenter[1], endCenter[1], eased),
+      zoom: lerp(startZoom, endZoom, eased)
     };
   }
 

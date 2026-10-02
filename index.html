@@ -1162,7 +1162,15 @@ async function exportVideo() {
     );
     var offsetX = oldCenterOnNewCam.x - scale * (EXPORT_WIDTH / 2);
     var offsetY = oldCenterOnNewCam.y - scale * (EXPORT_HEIGHT / 2);
-    ctx.drawImage(snapshot, offsetX, offsetY, EXPORT_WIDTH * scale, EXPORT_HEIGHT * scale);
+    // Draw slightly larger than the exact math calls for (centered on the
+    // same point) so floating-point rounding can never leave a sub-pixel
+    // gap at an edge — a touch of harmless overscan beats a visible seam.
+    var OVERSCAN = 1.03;
+    var drawW = EXPORT_WIDTH * scale * OVERSCAN;
+    var drawH = EXPORT_HEIGHT * scale * OVERSCAN;
+    var drawX = offsetX - (drawW - EXPORT_WIDTH * scale) / 2;
+    var drawY = offsetY - (drawH - EXPORT_HEIGHT * scale) / 2;
+    ctx.drawImage(snapshot, drawX, drawY, drawW, drawH);
 
     function project(latlng) {
       // latlng is [lat, lon].
